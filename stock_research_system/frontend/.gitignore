@@ -20,7 +20,7 @@
 # env
 .env
 .env*.local
-.env.*
+.env.backup
 
 # typescript
 *.tsbuildinfo
