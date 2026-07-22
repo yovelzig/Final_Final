@@ -9,5 +9,6 @@ build/
 *.egg-info/
 .env
 .env.backup
+
 .vscode/
 .idea/
