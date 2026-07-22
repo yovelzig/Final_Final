@@ -9,6 +9,11 @@ build/
 *.egg-info/
 .env
 .env.backup
+# Local environment files containing real secrets
+.env.local
+.env.production
+.env.development
+.env.test
 
 .vscode/
 .idea/
