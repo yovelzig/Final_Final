@@ -1,0 +1,89 @@
+"""Enumerations for the FinQuest learning domain.
+
+This module has no knowledge of any infrastructure (databases, queues,
+HTTP frameworks, LLM/RAG libraries, orchestration engines, etc.), and no
+knowledge of the market-data domain.
+"""
+
+from enum import StrEnum
+
+
+class FinancialSkillCategory(StrEnum):
+    MONEY_BASICS = "MONEY_BASICS"
+    INFLATION = "INFLATION"
+    COMPOUND_INTEREST = "COMPOUND_INTEREST"
+    ASSET_CLASSES = "ASSET_CLASSES"
+    STOCKS = "STOCKS"
+    BONDS = "BONDS"
+    FUNDS_AND_ETFS = "FUNDS_AND_ETFS"
+    MARKET_INDEXES = "MARKET_INDEXES"
+    RISK_AND_RETURN = "RISK_AND_RETURN"
+    DIVERSIFICATION = "DIVERSIFICATION"
+    PORTFOLIO_CONSTRUCTION = "PORTFOLIO_CONSTRUCTION"
+    FINANCIAL_STATEMENTS = "FINANCIAL_STATEMENTS"
+    VALUATION = "VALUATION"
+    CHART_READING = "CHART_READING"
+    INVESTOR_PSYCHOLOGY = "INVESTOR_PSYCHOLOGY"
+    FRAUD_AND_SCAMS = "FRAUD_AND_SCAMS"
+    FEES_AND_TAXES = "FEES_AND_TAXES"
+    LONG_TERM_INVESTING = "LONG_TERM_INVESTING"
+
+
+class DifficultyLevel(StrEnum):
+    BEGINNER = "BEGINNER"
+    EASY = "EASY"
+    MEDIUM = "MEDIUM"
+    HARD = "HARD"
+    ADVANCED = "ADVANCED"
+
+
+class ExerciseType(StrEnum):
+    SINGLE_CHOICE = "SINGLE_CHOICE"
+    MULTIPLE_CHOICE = "MULTIPLE_CHOICE"
+    TRUE_FALSE = "TRUE_FALSE"
+    NUMERIC_INPUT = "NUMERIC_INPUT"
+    ORDERING = "ORDERING"
+    SCENARIO_DECISION = "SCENARIO_DECISION"
+    TEXT_RESPONSE = "TEXT_RESPONSE"
+
+
+class LessonStatus(StrEnum):
+    DRAFT = "DRAFT"
+    PUBLISHED = "PUBLISHED"
+    ARCHIVED = "ARCHIVED"
+
+
+class AttemptStatus(StrEnum):
+    STARTED = "STARTED"
+    SUBMITTED = "SUBMITTED"
+    GRADED = "GRADED"
+    ABANDONED = "ABANDONED"
+
+
+class ProgressStatus(StrEnum):
+    NOT_STARTED = "NOT_STARTED"
+    IN_PROGRESS = "IN_PROGRESS"
+    COMPLETED = "COMPLETED"
+    MASTERED = "MASTERED"
+
+
+class MasteryLevel(StrEnum):
+    NOT_ASSESSED = "NOT_ASSESSED"
+    NOVICE = "NOVICE"
+    DEVELOPING = "DEVELOPING"
+    PROFICIENT = "PROFICIENT"
+    MASTERED = "MASTERED"
+
+
+class MisconceptionStatus(StrEnum):
+    ACTIVE = "ACTIVE"
+    IMPROVING = "IMPROVING"
+    RESOLVED = "RESOLVED"
+
+
+class ConfidenceLevel(StrEnum):
+    VERY_LOW = "VERY_LOW"
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+    VERY_HIGH = "VERY_HIGH"

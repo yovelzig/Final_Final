@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir -p \"stock_research_system/examples\" \"stock_research_system/src/stock_research_core/domain\" \"stock_research_system/src/stock_research_core/contracts\" \"stock_research_system/tests\")"
+    ],
+    "additionalDirectories": [
+      "c:\\Users\\yovelz\\Desktop\\Final_Final\\stock_research_system"
+    ]
+  }
+}

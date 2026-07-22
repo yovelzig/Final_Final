@@ -1,0 +1,10 @@
+{
+  "ticker": "NVDA",
+  "user_question": "Analyze NVIDIA and select the strongest investment horizon.",
+  "requested_horizons_days": [
+    5,
+    20,
+    60
+  ],
+  "force_full_refresh": false
+}

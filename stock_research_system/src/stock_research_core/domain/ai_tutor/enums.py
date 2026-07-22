@@ -1,0 +1,103 @@
+"""Enumerations for the FinQuest grounded AI tutor and knowledge base.
+
+This module has no knowledge of any infrastructure (databases, queues,
+HTTP frameworks, pandas/NumPy/SciPy, yfinance, ML/LLM/RAG libraries,
+orchestration engines, etc.).
+"""
+
+from enum import StrEnum
+
+
+class KnowledgeSourceType(StrEnum):
+    CURRICULUM_LESSON = "CURRICULUM_LESSON"
+    CURRICULUM_EXERCISE_EXPLANATION = "CURRICULUM_EXERCISE_EXPLANATION"
+    LOCAL_MARKDOWN = "LOCAL_MARKDOWN"
+    LOCAL_TEXT = "LOCAL_TEXT"
+    LOCAL_PDF = "LOCAL_PDF"
+    LOCAL_DOCX = "LOCAL_DOCX"
+    MANUAL_CONTENT = "MANUAL_CONTENT"
+    SCENARIO_EDUCATION = "SCENARIO_EDUCATION"
+    PORTFOLIO_EDUCATION = "PORTFOLIO_EDUCATION"
+
+
+class KnowledgeApprovalStatus(StrEnum):
+    DRAFT = "DRAFT"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    ARCHIVED = "ARCHIVED"
+
+
+class KnowledgeDocumentStatus(StrEnum):
+    PENDING = "PENDING"
+    PROCESSED = "PROCESSED"
+    FAILED = "FAILED"
+    ARCHIVED = "ARCHIVED"
+
+
+class KnowledgeIngestionRunStatus(StrEnum):
+    STARTED = "STARTED"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    NO_CONTENT = "NO_CONTENT"
+
+
+class TutorContextType(StrEnum):
+    GENERAL_EDUCATION = "GENERAL_EDUCATION"
+    LESSON_HELP = "LESSON_HELP"
+    EXERCISE_HELP = "EXERCISE_HELP"
+    SCENARIO_BEFORE_DECISION = "SCENARIO_BEFORE_DECISION"
+    SCENARIO_AFTER_REVEAL = "SCENARIO_AFTER_REVEAL"
+    PORTFOLIO_EXPLANATION = "PORTFOLIO_EXPLANATION"
+
+
+class TutorConversationStatus(StrEnum):
+    ACTIVE = "ACTIVE"
+    CLOSED = "CLOSED"
+    ARCHIVED = "ARCHIVED"
+
+
+class TutorMessageRole(StrEnum):
+    USER = "USER"
+    ASSISTANT = "ASSISTANT"
+    SYSTEM = "SYSTEM"
+
+
+class TutorRequestCategory(StrEnum):
+    ALLOWED_EDUCATION = "ALLOWED_EDUCATION"
+    PERSONALIZED_INVESTMENT_ADVICE = "PERSONALIZED_INVESTMENT_ADVICE"
+    BUY_SELL_REQUEST = "BUY_SELL_REQUEST"
+    GUARANTEED_RETURN_REQUEST = "GUARANTEED_RETURN_REQUEST"
+    UNSUPPORTED_TOPIC = "UNSUPPORTED_TOPIC"
+    INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"
+
+
+class TutorGuardrailAction(StrEnum):
+    ALLOW = "ALLOW"
+    ALLOW_WITH_BOUNDARY = "ALLOW_WITH_BOUNDARY"
+    REFUSE = "REFUSE"
+    FALLBACK = "FALLBACK"
+
+
+class TutorAnswerStatus(StrEnum):
+    GENERATED = "GENERATED"
+    VALIDATED = "VALIDATED"
+    REJECTED = "REJECTED"
+    FALLBACK = "FALLBACK"
+
+
+class TutorProviderType(StrEnum):
+    EXTRACTIVE = "EXTRACTIVE"
+    OPENAI_COMPATIBLE = "OPENAI_COMPATIBLE"
+
+
+class RetrievalMethod(StrEnum):
+    VECTOR = "VECTOR"
+    LEXICAL = "LEXICAL"
+    HYBRID = "HYBRID"
+
+
+class GroundingStatus(StrEnum):
+    GROUNDED = "GROUNDED"
+    PARTIALLY_GROUNDED = "PARTIALLY_GROUNDED"
+    INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"
+    INVALID_CITATIONS = "INVALID_CITATIONS"

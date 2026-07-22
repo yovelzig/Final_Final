@@ -1,0 +1,294 @@
+{
+  "name": "FinQuest - Quality Evaluation",
+  "nodes": [
+    {
+      "id": "b1a1a001-0000-4000-8000-000000000001",
+      "name": "Weekly Schedule (or run manually)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 300],
+      "parameters": {
+        "rule": {
+          "interval": [
+            { "field": "cronExpression", "expression": "0 5 * * 0" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "b1a1a001-0000-4000-8000-000000000002",
+      "name": "Build Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const now = new Date();\nconst period = now.toISOString().slice(0, 10);\nconst jobType = 'RAGAS_QUALITY_EVALUATION';\nconst suiteId = $vars.FINQUEST_EVAL_SUITE_ID;\nconst mode = $vars.FINQUEST_EVAL_MODE || 'DETERMINISTIC';\nconst suiteVersion = $vars.FINQUEST_EVAL_SUITE_VERSION || 'v1';\nif (!suiteId) { throw new Error('FINQUEST_EVAL_SUITE_ID must be set (the approved suite to evaluate)'); }\nconst parameters = { suite_id: suiteId, mode, maximum_concurrency: 4 };\nreturn [{\n  json: {\n    jobType,\n    parameters,\n    // Idempotency key derived from suite version + mode + scheduled period\n    // (spec section 24) - a manual retry within the same period returns\n    // the same canonical run instead of creating a duplicate.\n    idempotencyKey: `quality-eval-${suiteVersion}-${mode}-${period}`,\n    externalRequestId: `${$workflow.id}-${$execution.id}-${Date.now()}`,\n  }\n}];"
+      }
+    },
+    {
+      "id": "b1a1a001-0000-4000-8000-000000000003",
+      "name": "Trigger FinQuest Job",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [680, 300],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.FINQUEST_API_BASE_URL || 'http://finquest-api:8080' }}/api/v1/integrations/n8n/jobs",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "X-FinQuest-Key-Id", "value": "={{ $vars.FINQUEST_KEY_ID }}" },
+            { "name": "X-FinQuest-Request-ID", "value": "={{ $json.externalRequestId }}" },
+            { "name": "Idempotency-Key", "value": "={{ $json.idempotencyKey }}" }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            { "name": "job_type", "value": "={{ $json.jobType }}" },
+            { "name": "parameters", "value": "={{ $json.parameters }}" }
+          ]
+        },
+        "options": { "timeout": 15000 }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "__REPLACE_WITH_YOUR_CREDENTIAL_ID__",
+          "name": "FinQuest Integration Key"
+        }
+      },
+      "notes": "The n8n credential supplies X-FinQuest-Integration-Key (the secret half) - never inlined in this workflow JSON. See ../credentials.example.md."
+    },
+    {
+      "id": "b1a1a001-0000-4000-8000-000000000004",
+      "name": "Init Polling State",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 300],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const body = $input.first().json;\nconst jobId = (body.job && body.job.job_id) || body.job_id;\nif (!jobId) { throw new Error('FinQuest did not return a job_id'); }\nreturn [{ json: { jobId, attempt: 0, maxAttempts: 80, waitSeconds: 15 } }];"
+      }
+    },
+    {
+      "id": "b1a1a001-0000-4000-8000-000000000005",
+      "name": "Wait Before Poll",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [1120, 300],
+      "parameters": {
+        "amount": "={{ $json.waitSeconds }}",
+        "unit": "seconds"
+      },
+      "webhookId": "b1a1a001-0000-4000-8000-0000000000w1"
+    },
+    {
+      "id": "b1a1a001-0000-4000-8000-000000000006",
+      "name": "Poll Job Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1340, 300],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $vars.FINQUEST_API_BASE_URL || 'http://finquest-api:8080' }}/api/v1/integrations/n8n/jobs/{{ $json.jobId }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "X-FinQuest-Key-Id", "value": "={{ $vars.FINQUEST_KEY_ID }}" }
+          ]
+        },
+        "options": { "timeout": 15000 }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "__REPLACE_WITH_YOUR_CREDENTIAL_ID__",
+          "name": "FinQuest Integration Key"
+        }
+      }
+    },
+    {
+      "id": "b1a1a001-0000-4000-8000-000000000007",
+      "name": "Merge Polling State",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 300],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const polled = $input.first().json;\nconst state = $('Init Polling State').first().json;\nreturn [{ json: { ...state, status: polled.status, resultSummary: polled.result_summary || {} } }];"
+      }
+    },
+    {
+      "id": "b1a1a001-0000-4000-8000-000000000008",
+      "name": "Is Terminal Or Timed Out?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1780, 300],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "combinator": "or",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.status === 'SUCCEEDED' || $json.status === 'FAILED' || $json.status === 'CANCELLED' || $json.status === 'SKIPPED' }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "true" }
+            },
+            {
+              "leftValue": "={{ $json.attempt >= $json.maxAttempts }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "true" }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "b1a1a001-0000-4000-8000-000000000009",
+      "name": "Increment Attempt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 480],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const state = $input.first().json;\nreturn [{ json: { ...state, attempt: (state.attempt || 0) + 1 } }];"
+      }
+    },
+    {
+      "id": "b1a1a001-0000-4000-8000-00000000000a",
+      "name": "Build Structured Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2000, 200],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const state = $input.first().json;\nconst timedOut = !['SUCCEEDED','FAILED','CANCELLED','SKIPPED'].includes(state.status);\nconst summary = state.resultSummary || {};\nreturn [{ json: {\n  jobId: state.jobId,\n  finalStatus: timedOut ? 'POLLING_TIMEOUT' : state.status,\n  attempts: state.attempt,\n  runId: summary.run_id || null,\n  gateStatus: summary.gate_status || null,\n  completedCaseCount: summary.completed_case_count ?? null,\n  failedCaseCount: summary.failed_case_count ?? null,\n  regressionResult: summary.regression_result || null,\n} }];"
+      }
+    },
+    {
+      "id": "b1a1a001-0000-4000-8000-00000000000b",
+      "name": "Succeeded With A Run?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [2220, 200],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.finalStatus === 'SUCCEEDED' && !!$json.runId && !!$vars.FINQUEST_EVAL_BASELINE_ID }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "true" }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "b1a1a001-0000-4000-8000-00000000000c",
+      "name": "Trigger Baseline Comparison (optional)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2440, 120],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.FINQUEST_API_BASE_URL || 'http://finquest-api:8080' }}/api/v1/integrations/n8n/jobs",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "X-FinQuest-Key-Id", "value": "={{ $vars.FINQUEST_KEY_ID }}" },
+            { "name": "X-FinQuest-Request-ID", "value": "={{ $workflow.id }}-{{ $execution.id }}-compare" },
+            { "name": "Idempotency-Key", "value": "={{ 'quality-eval-compare-' + $json.runId }}" }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            { "name": "job_type", "value": "QUALITY_BASELINE_COMPARISON" },
+            {
+              "name": "parameters",
+              "value": "={{ { run_id: $json.runId, baseline_id: $vars.FINQUEST_EVAL_BASELINE_ID } }}"
+            }
+          ]
+        },
+        "options": { "timeout": 15000 }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "__REPLACE_WITH_YOUR_CREDENTIAL_ID__",
+          "name": "FinQuest Integration Key"
+        }
+      },
+      "notes": "Only fires a comparison job - never approves a baseline and never deploys/rolls back anything. Set FINQUEST_EVAL_BASELINE_ID to enable; leave unset to skip this step entirely."
+    },
+    {
+      "id": "b1a1a001-0000-4000-8000-00000000000d",
+      "name": "Notify (not implemented in this phase)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [2440, 280],
+      "parameters": {},
+      "notes": "Connect a Slack/Email node here in a future phase. Never connects to PostgreSQL directly."
+    }
+  ],
+  "connections": {
+    "Weekly Schedule (or run manually)": {
+      "main": [[{ "node": "Build Request", "type": "main", "index": 0 }]]
+    },
+    "Build Request": {
+      "main": [[{ "node": "Trigger FinQuest Job", "type": "main", "index": 0 }]]
+    },
+    "Trigger FinQuest Job": {
+      "main": [[{ "node": "Init Polling State", "type": "main", "index": 0 }]]
+    },
+    "Init Polling State": {
+      "main": [[{ "node": "Wait Before Poll", "type": "main", "index": 0 }]]
+    },
+    "Wait Before Poll": {
+      "main": [[{ "node": "Poll Job Status", "type": "main", "index": 0 }]]
+    },
+    "Poll Job Status": {
+      "main": [[{ "node": "Merge Polling State", "type": "main", "index": 0 }]]
+    },
+    "Merge Polling State": {
+      "main": [[{ "node": "Is Terminal Or Timed Out?", "type": "main", "index": 0 }]]
+    },
+    "Is Terminal Or Timed Out?": {
+      "main": [
+        [{ "node": "Build Structured Summary", "type": "main", "index": 0 }],
+        [{ "node": "Increment Attempt", "type": "main", "index": 0 }]
+      ]
+    },
+    "Increment Attempt": {
+      "main": [[{ "node": "Wait Before Poll", "type": "main", "index": 0 }]]
+    },
+    "Build Structured Summary": {
+      "main": [[{ "node": "Succeeded With A Run?", "type": "main", "index": 0 }]]
+    },
+    "Succeeded With A Run?": {
+      "main": [
+        [{ "node": "Trigger Baseline Comparison (optional)", "type": "main", "index": 0 }],
+        [{ "node": "Notify (not implemented in this phase)", "type": "main", "index": 0 }]
+      ]
+    },
+    "Trigger Baseline Comparison (optional)": {
+      "main": [[{ "node": "Notify (not implemented in this phase)", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "description": "FinQuest Phase 13: triggers a RAGAS_QUALITY_EVALUATION background job via the n8n integration API, polls PostgreSQL-backed job status through the API (never connects to the database directly), optionally triggers a QUALITY_BASELINE_COMPARISON job when FINQUEST_EVAL_BASELINE_ID is set, and produces a structured summary. Never approves a baseline and never deploys or rolls back code."
+  },
+  "id": "b1a1a001-quality-evaluation",
+  "tags": ["finquest", "phase-13"]
+}

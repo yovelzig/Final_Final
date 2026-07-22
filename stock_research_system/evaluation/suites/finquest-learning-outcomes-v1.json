@@ -1,0 +1,76 @@
+{
+  "description": "Fixture definitions for application.quality_evaluation.learning_metrics unit tests - not a QualityEvaluationCase suite (learning-outcome metrics grade FinQuest's own mastery/misconception/scenario/portfolio-risk records, not a tutor/Coach response, so this file has no user_input/context_type fields).",
+  "calculation_version": "learning-metrics-v1",
+  "confidence_to_probability_mapping": {
+    "VERY_LOW": 0.10,
+    "LOW": 0.30,
+    "MEDIUM": 0.50,
+    "HIGH": 0.70,
+    "VERY_HIGH": 0.90
+  },
+  "calibration_bin_boundaries": [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+  "fixtures": [
+    {
+      "name": "typical_mastery_gain",
+      "metric_type": "MASTERY_GAIN",
+      "pre_mastery_score": 0.4,
+      "post_mastery_score": 0.7,
+      "expected_value": 0.3
+    },
+    {
+      "name": "normalized_gain_typical",
+      "metric_type": "NORMALIZED_LEARNING_GAIN",
+      "pre_score": 0.4,
+      "post_score": 0.7,
+      "expected_value": 0.5
+    },
+    {
+      "name": "normalized_gain_perfect_pre_score_is_not_applicable",
+      "metric_type": "NORMALIZED_LEARNING_GAIN",
+      "pre_score": 1.0,
+      "post_score": 1.0,
+      "expected_value": null
+    },
+    {
+      "name": "retention_ratio_typical",
+      "metric_type": "RETENTION_RATIO",
+      "immediate_post_learning_score": 0.8,
+      "delayed_review_score": 0.4,
+      "expected_value": 0.5
+    },
+    {
+      "name": "misconception_recurrence_typical",
+      "metric_type": "MISCONCEPTION_RECURRENCE_RATE",
+      "repeated_evidence_count": 1,
+      "eligible_opportunity_count": 4,
+      "expected_value": 0.25
+    },
+    {
+      "name": "confidence_brier_overconfident_and_wrong",
+      "metric_type": "CONFIDENCE_BRIER_SCORE",
+      "predictions": [["VERY_HIGH", false]],
+      "expected_value": 0.81
+    },
+    {
+      "name": "scenario_decision_quality_gain_typical",
+      "metric_type": "SCENARIO_DECISION_QUALITY_GAIN",
+      "earlier_decision_quality_score": 0.4,
+      "later_decision_quality_score": 0.6,
+      "expected_value": 0.2
+    },
+    {
+      "name": "risk_identification_gain_typical",
+      "metric_type": "RISK_IDENTIFICATION_GAIN",
+      "earlier_risk_identification_score": 0.3,
+      "later_risk_identification_score": 0.5,
+      "expected_value": 0.2
+    },
+    {
+      "name": "lesson_completion_rate_typical",
+      "metric_type": "LESSON_COMPLETION_RATE",
+      "completed_count": 6,
+      "eligible_count": 8,
+      "expected_value": 0.75
+    }
+  ]
+}

@@ -1,0 +1,314 @@
+{
+  "name": "FinQuest - Knowledge Refresh",
+  "nodes": [
+    {
+      "id": "13533e23-0a82-4563-a478-b077ddf6749a",
+      "name": "Weekly Schedule (or run manually)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        240,
+        300
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 3 * * 0"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "b4340f63-1784-46f5-9394-0a692a6ee2b8",
+      "name": "Build Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        460,
+        300
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const now = new Date().toISOString();\nconst jobType = 'CURRICULUM_KNOWLEDGE_REFRESH';\nconst parameters = { include_lessons: true, include_exercise_explanations: true, reembed: false };\nreturn [{\n  json: {\n    jobType,\n    parameters,\n    idempotencyKey: `${jobType}-${$workflow.id}-${now.slice(0,13)}`,\n    externalRequestId: `${$workflow.id}-${$execution.id}-${Date.now()}`,\n  }\n}];"
+      }
+    },
+    {
+      "id": "13806177-b93e-4757-a21e-e9211438d82d",
+      "name": "Init Polling State",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        300
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const body = $input.first().json;\nconst jobId = (body.job && body.job.job_id) || body.job_id;\nif (!jobId) { throw new Error('FinQuest did not return a job_id'); }\nreturn [{ json: { jobId, attempt: 0, maxAttempts: 40, waitSeconds: 15 } }];"
+      }
+    },
+    {
+      "id": "d1c00064-3803-46fe-ba77-d926dae03476",
+      "name": "Wait Before Poll",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        900,
+        300
+      ],
+      "parameters": {
+        "amount": "={{ $json.waitSeconds }}",
+        "unit": "seconds"
+      },
+      "webhookId": "287bd2bc-ee18-4765-b480-14ffa2f8ad70"
+    },
+    {
+      "id": "af28e349-b99d-4c8b-bc2e-7e100555a537",
+      "name": "Poll Job Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1120,
+        300
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $vars.FINQUEST_API_BASE_URL || 'http://finquest-api:8080' }}/api/v1/integrations/n8n/jobs/{{ $json.jobId }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-FinQuest-Key-Id",
+              "value": "={{ $vars.FINQUEST_KEY_ID }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "__REPLACE_WITH_YOUR_CREDENTIAL_ID__",
+          "name": "FinQuest Integration Key"
+        }
+      }
+    },
+    {
+      "id": "ee97a333-a3fe-4a9e-a554-abb771b1ffe7",
+      "name": "Merge Polling State",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1340,
+        300
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const polled = $input.first().json;\nconst state = $('Init Polling State').first().json;\nconst attempt = (state.attempt || 0) + ($('Increment Attempt').first(false) ? 1 : 0);\nreturn [{ json: { ...state, status: polled.status, resultSummary: polled.result_summary || {} } }];"
+      }
+    },
+    {
+      "id": "5a86cc63-cc37-489b-9b06-0a8637a548f9",
+      "name": "Is Terminal Or Timed Out?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1560,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "combinator": "or",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.status === 'SUCCEEDED' || $json.status === 'FAILED' || $json.status === 'CANCELLED' || $json.status === 'SKIPPED' }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            },
+            {
+              "leftValue": "={{ $json.attempt >= $json.maxAttempts }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "67613930-ac26-4489-a719-f0cc35cf6dc3",
+      "name": "Increment Attempt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1340,
+        460
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const state = $input.first().json;\nreturn [{ json: { ...state, attempt: (state.attempt || 0) + 1 } }];"
+      }
+    },
+    {
+      "id": "8a829db6-2794-4ef4-9e1f-2530551ab1dd",
+      "name": "Build Structured Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1780,
+        200
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const state = $input.first().json;\nconst timedOut = !['SUCCEEDED','FAILED','CANCELLED','SKIPPED'].includes(state.status);\nreturn [{ json: {\n  jobId: state.jobId,\n  finalStatus: timedOut ? 'POLLING_TIMEOUT' : state.status,\n  attempts: state.attempt,\n  resultSummary: state.resultSummary,\n} }];"
+      }
+    },
+    {
+      "id": "892ae3a3-21c2-4f86-a426-3f62f06767f0",
+      "name": "Notify (not implemented in this phase)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        2000,
+        200
+      ],
+      "parameters": {},
+      "notes": "Connect a Slack/Email node here in a future phase. Never connects to PostgreSQL directly."
+    }
+  ],
+  "connections": {
+    "Weekly Schedule (or run manually)": {
+      "main": [
+        [
+          {
+            "node": "Build Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Request": {
+      "main": [
+        [
+          {
+            "node": "Init Polling State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Init Polling State": {
+      "main": [
+        [
+          {
+            "node": "Wait Before Poll",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait Before Poll": {
+      "main": [
+        [
+          {
+            "node": "Poll Job Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Poll Job Status": {
+      "main": [
+        [
+          {
+            "node": "Merge Polling State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Polling State": {
+      "main": [
+        [
+          {
+            "node": "Is Terminal Or Timed Out?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Terminal Or Timed Out?": {
+      "main": [
+        [
+          {
+            "node": "Build Structured Summary",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Increment Attempt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Increment Attempt": {
+      "main": [
+        [
+          {
+            "node": "Wait Before Poll",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Structured Summary": {
+      "main": [
+        [
+          {
+            "node": "Notify (not implemented in this phase)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "description": "FinQuest Phase 11: triggers a CURRICULUM_KNOWLEDGE_REFRESH background job via the n8n integration API, polls PostgreSQL-backed job status through the API (never connects to the database directly), and produces a structured summary."
+  },
+  "id": "15a0b961-335d-4742-bd6b-7eac4805fc11",
+  "tags": [
+    "finquest",
+    "phase-11"
+  ]
+}

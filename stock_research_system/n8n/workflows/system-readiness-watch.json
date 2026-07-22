@@ -1,0 +1,137 @@
+{
+  "name": "FinQuest - System Readiness Watch",
+  "nodes": [
+    {
+      "id": "7ee313d8-f3dc-4a69-9703-69574a18f25d",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        240,
+        300
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 * * * *"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "44669575-6c90-472d-a856-886d13be3b05",
+      "name": "Call Integration Readiness",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        460,
+        300
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $vars.FINQUEST_API_BASE_URL || 'http://finquest-api:8080' }}/api/v1/integrations/n8n/ready",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-FinQuest-Key-Id",
+              "value": "={{ $vars.FINQUEST_KEY_ID }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 10000,
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "__REPLACE_WITH_YOUR_CREDENTIAL_ID__",
+          "name": "FinQuest Integration Key"
+        }
+      }
+    },
+    {
+      "id": "8af71c77-04bb-4b00-9fd5-1432910e4dd6",
+      "name": "Evaluate Readiness",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        300
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const body = $input.first().json;\nconst ready = body && body.ready === true;\nreturn [{ json: {\n  checkedAt: new Date().toISOString(),\n  ready,\n  databaseReady: !!(body && body.database_ready),\n  redisReady: !!(body && body.redis_ready),\n  migrationUpToDate: !!(body && body.migration_up_to_date),\n  status: ready ? 'HEALTHY' : 'UNHEALTHY',\n} }];"
+      }
+    },
+    {
+      "id": "e03b4eb8-dc95-45b5-9c3a-e8f7a45a07df",
+      "name": "Notify (not implemented in this phase)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        900,
+        300
+      ],
+      "parameters": {},
+      "notes": "Connect a Slack/Email node here in a future phase. Never connects to PostgreSQL directly."
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Call Integration Readiness",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Integration Readiness": {
+      "main": [
+        [
+          {
+            "node": "Evaluate Readiness",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evaluate Readiness": {
+      "main": [
+        [
+          {
+            "node": "Notify (not implemented in this phase)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "description": "FinQuest Phase 11: hourly integration-safe readiness check. Produces a structured HEALTHY/UNHEALTHY status; the final node is a documented placeholder for a future notification integration (email/Slack) - not implemented in this phase."
+  },
+  "id": "6be27160-68b1-46af-a5b8-b77f3a3aff7d",
+  "tags": [
+    "finquest",
+    "phase-11"
+  ]
+}

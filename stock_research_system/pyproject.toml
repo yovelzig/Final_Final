@@ -1,0 +1,82 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stock-research-core"
+version = "0.1.0"
+description = "Shared domain models and service contracts for an AI stock research system"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.7,<3",
+    "pydantic-settings>=2.2,<3",
+    "yfinance>=0.2,<1",
+    "pandas>=2.2,<3",
+    "sqlalchemy>=2.0,<3",
+    "asyncpg>=0.29,<1",
+    "alembic>=1.13,<2",
+    "pgvector>=0.3,<1",
+    "httpx>=0.27,<1",
+    "pypdf>=4,<6",
+    "python-docx>=1,<2",
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.30,<1",
+    "PyJWT>=2.8,<3",
+    "pwdlib[argon2]>=0.2,<1",
+    "python-multipart>=0.0.9,<1",
+    "email-validator>=2.1,<3",
+    "celery[redis]>=5.4,<6",
+    "redis>=5.0,<6",
+    "prometheus-client>=0.20,<1",
+    "structlog>=24,<25",
+    "langgraph>=1.0,<2",
+    "langgraph-checkpoint-postgres>=3.0,<4",
+    "psycopg[binary,pool]>=3.2,<4"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8,<9",
+    "pytest-asyncio>=0.23,<2",
+    "pytest-repeat>=0.9,<1"
+]
+ai_tutor = [
+    "sentence-transformers>=3,<4"
+]
+langsmith = [
+    "langsmith>=0.2,<1"
+]
+otel = [
+    "opentelemetry-api>=1.27,<2",
+    "opentelemetry-sdk>=1.27,<2",
+    "opentelemetry-exporter-otlp>=1.27,<2",
+    "opentelemetry-instrumentation-fastapi>=0.48b0",
+    "opentelemetry-instrumentation-sqlalchemy>=0.48b0",
+    "opentelemetry-instrumentation-redis>=0.48b0",
+    "opentelemetry-instrumentation-celery>=0.48b0"
+]
+# Phase 13 quality-evaluation platform. `ragas` itself has no upper
+# bound on `langchain-community`, but the latest langchain-community
+# (0.4.x) dropped `chat_models.vertexai`, which `ragas.llms.base`
+# imports unconditionally at import time - pinning langchain-community
+# here is what actually makes `import ragas` succeed. Re-verify both
+# pins together (via tests/unit/test_ragas_adapter.py's compatibility
+# smoke test) before ever bumping either one.
+quality_evaluation = [
+    "ragas==0.4.3",
+    "langchain-community==0.3.31",
+    "openai>=1,<2"
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+markers = [
+    "integration: requires a running PostgreSQL/TimescaleDB test database",
+]
