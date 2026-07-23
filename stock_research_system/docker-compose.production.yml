@@ -1,0 +1,410 @@
+networks:
+  finquest-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+
+services:
+  stock-db:
+    image: timescale/timescaledb:2.17.2-pg16
+    container_name: stock-db
+    restart: unless-stopped
+    stop_grace_period: 60s
+
+    networks:
+      - finquest-net
+
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER must be set}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB must be set}
+
+    volumes:
+      - stock_db_data:/var/lib/postgresql/data
+
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  redis:
+    image: redis:7-alpine
+    container_name: finquest-redis
+    restart: unless-stopped
+    networks: [finquest-net]
+    # No host port mapping - Redis is reachable only from other
+    # containers on `finquest-net`, never from the host or the public
+    # internet by default.
+    command: >
+      redis-server
+      --maxmemory 256mb
+      --maxmemory-policy noeviction
+      --save ""
+      --appendonly no
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    # Deliberately no volume: task delivery is transient by design
+    # (PostgreSQL is the durable source of truth, per README ss"Phase
+    # 11" - losing in-flight Redis state at worst delays a job, it never
+    # loses one, since `BackgroundJobService.create_job` durably persists
+    # PENDING before ever enqueueing).
+
+  finquest-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: ai
+    container_name: finquest-api
+    restart: unless-stopped
+    networks: [finquest-net]
+    depends_on:
+      stock-db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      # PostgreSQL
+      DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER:?POSTGRES_USER must be set}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@stock-db:5432/${POSTGRES_DB:?POSTGRES_DB must be set}"
+      DATABASE_ECHO: ${DATABASE_ECHO:-false}
+      DATABASE_POOL_SIZE: ${DATABASE_POOL_SIZE:-5}
+      DATABASE_MAX_OVERFLOW: ${DATABASE_MAX_OVERFLOW:-10}
+
+      # API
+      API_TITLE: "${API_TITLE:-FinQuest API}"
+      API_VERSION: ${API_VERSION:-1.0.0}
+      API_PREFIX: ${API_PREFIX:-/api/v1}
+      API_HOST: 0.0.0.0
+      API_PORT: 8080
+      API_CORS_ORIGINS: ${FINQUEST_WEB_ORIGIN:?FINQUEST_WEB_ORIGIN must be set}
+      API_DOCS_ENABLED: ${API_DOCS_ENABLED:-false}
+      API_RATE_LIMIT_ENABLED: ${API_RATE_LIMIT_ENABLED:-true}
+      API_LOGIN_RATE_LIMIT: ${API_LOGIN_RATE_LIMIT:-10}
+      API_LOGIN_RATE_WINDOW_SECONDS: ${API_LOGIN_RATE_WINDOW_SECONDS:-60}
+
+      # Authentication
+      AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:?AUTH_JWT_SECRET must be set}
+      AUTH_JWT_ALGORITHM: ${AUTH_JWT_ALGORITHM:-HS256}
+      AUTH_JWT_ISSUER: ${AUTH_JWT_ISSUER:-finquest}
+      AUTH_JWT_AUDIENCE: ${AUTH_JWT_AUDIENCE:-finquest-api}
+      AUTH_ACCESS_TOKEN_MINUTES: ${AUTH_ACCESS_TOKEN_MINUTES:-15}
+      AUTH_REFRESH_TOKEN_DAYS: ${AUTH_REFRESH_TOKEN_DAYS:-30}
+      AUTH_MAX_FAILED_LOGINS: ${AUTH_MAX_FAILED_LOGINS:-5}
+      AUTH_LOCKOUT_MINUTES: ${AUTH_LOCKOUT_MINUTES:-15}
+
+      # Embeddings
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-sentence_transformer}
+      EMBEDDING_MODEL_NAME: ${EMBEDDING_MODEL_NAME:-sentence-transformers/all-MiniLM-L6-v2}
+      EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-384}
+      EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE:-32}
+
+      # Tutor
+      TUTOR_MODEL_PROVIDER: ${TUTOR_MODEL_PROVIDER:-extractive}
+      TUTOR_MODEL_BASE_URL: "${TUTOR_MODEL_BASE_URL:-}"
+      TUTOR_MODEL_API_KEY: "${TUTOR_MODEL_API_KEY:-}"
+      TUTOR_MODEL_NAME: "${TUTOR_MODEL_NAME:-}"
+      TUTOR_MODEL_TIMEOUT_SECONDS: ${TUTOR_MODEL_TIMEOUT_SECONDS:-60}
+
+      # Runtime
+      FINQUEST_ENV: ${FINQUEST_ENV:-production}
+      ALLOW_FAKE_EMBEDDINGS_IN_PRODUCTION: ${ALLOW_FAKE_EMBEDDINGS_IN_PRODUCTION:-false}
+
+      # Redis and Celery
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      CELERY_WORKER_PREFETCH_MULTIPLIER: ${CELERY_WORKER_PREFETCH_MULTIPLIER:-1}
+      CELERY_TASK_ACKS_LATE: ${CELERY_TASK_ACKS_LATE:-true}
+
+      # Metrics, tracing and readiness
+      METRICS_ENABLED: ${METRICS_ENABLED:-true}
+      METRICS_REQUIRE_AUTH: ${METRICS_REQUIRE_AUTH:-true}
+      OTEL_ENABLED: ${OTEL_ENABLED:-false}
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-finquest-api}
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
+      OTEL_SAMPLE_RATIO: ${OTEL_SAMPLE_RATIO:-0.1}
+      READINESS_REQUIRE_WORKER: ${READINESS_REQUIRE_WORKER:-true}
+      READINESS_REQUIRE_REDIS: ${READINESS_REQUIRE_REDIS:-true}
+
+      # Trusted proxy
+      TRUST_FORWARDED_HEADERS: "true"
+      TRUSTED_PROXY_CIDRS: "172.28.0.0/24"
+
+      # LangGraph
+      LANGGRAPH_ENABLED: ${LANGGRAPH_ENABLED:-false}
+      LANGGRAPH_GRAPH_VERSION: ${LANGGRAPH_GRAPH_VERSION:-learning-coach-graph-v1}
+      LANGGRAPH_MAX_STEPS: ${LANGGRAPH_MAX_STEPS:-30}
+      LANGGRAPH_RUN_TIMEOUT_SECONDS: ${LANGGRAPH_RUN_TIMEOUT_SECONDS:-90}
+      LANGGRAPH_MAX_REPAIR_ATTEMPTS: ${LANGGRAPH_MAX_REPAIR_ATTEMPTS:-1}
+      LANGGRAPH_MODEL_INTENT_CLASSIFICATION: ${LANGGRAPH_MODEL_INTENT_CLASSIFICATION:-false}
+
+      LANGGRAPH_CHECKPOINTER_ENABLED: ${LANGGRAPH_CHECKPOINTER_ENABLED:-true}
+      LANGGRAPH_CHECKPOINT_SCHEMA: ${LANGGRAPH_CHECKPOINT_SCHEMA:-langgraph}
+      LANGGRAPH_CHECKPOINTER_POOL_MIN_SIZE: ${LANGGRAPH_CHECKPOINTER_POOL_MIN_SIZE:-1}
+      LANGGRAPH_CHECKPOINTER_POOL_MAX_SIZE: ${LANGGRAPH_CHECKPOINTER_POOL_MAX_SIZE:-2}
+
+      LANGGRAPH_THREAD_LOCK_TTL_SECONDS: ${LANGGRAPH_THREAD_LOCK_TTL_SECONDS:-120}
+      LANGGRAPH_THREAD_LOCK_WAIT_SECONDS: ${LANGGRAPH_THREAD_LOCK_WAIT_SECONDS:-2}
+      LANGGRAPH_MAX_CONTEXT_CHARACTERS: ${LANGGRAPH_MAX_CONTEXT_CHARACTERS:-20000}
+      LANGGRAPH_MAX_STATE_LIST_ITEMS: ${LANGGRAPH_MAX_STATE_LIST_ITEMS:-50}
+
+      LANGGRAPH_INTENT_MODEL_BASE_URL: "${LANGGRAPH_INTENT_MODEL_BASE_URL:-}"
+      LANGGRAPH_INTENT_MODEL_API_KEY: "${LANGGRAPH_INTENT_MODEL_API_KEY:-}"
+      LANGGRAPH_INTENT_MODEL_NAME: "${LANGGRAPH_INTENT_MODEL_NAME:-}"
+
+      # LangSmith
+      LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
+      LANGSMITH_API_KEY: "${LANGSMITH_API_KEY:-}"
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-finquest-learning-coach}
+      LANGSMITH_TRACE_CONTENT: ${LANGSMITH_TRACE_CONTENT:-false}
+
+      # Quality evaluation
+      QUALITY_EVALUATION_MODE: ${QUALITY_EVALUATION_MODE:-DETERMINISTIC}
+      RAGAS_ENABLED: ${RAGAS_ENABLED:-false}
+      RAGAS_EVALUATOR_PROVIDER: ${RAGAS_EVALUATOR_PROVIDER:-openai_compatible}
+      RAGAS_EVALUATOR_BASE_URL: "${RAGAS_EVALUATOR_BASE_URL:-}"
+      RAGAS_EVALUATOR_API_KEY: "${RAGAS_EVALUATOR_API_KEY:-}"
+      RAGAS_EVALUATOR_MODEL: "${RAGAS_EVALUATOR_MODEL:-}"
+      RAGAS_EMBEDDING_PROVIDER: ${RAGAS_EMBEDDING_PROVIDER:-existing_finquest}
+      RAGAS_MAX_CONCURRENCY: ${RAGAS_MAX_CONCURRENCY:-2}
+      RAGAS_TIMEOUT_SECONDS: ${RAGAS_TIMEOUT_SECONDS:-120}
+      RAGAS_MAX_RETRIES: ${RAGAS_MAX_RETRIES:-2}
+      RAGAS_MAX_SAMPLES_PER_RUN: ${RAGAS_MAX_SAMPLES_PER_RUN:-200}
+      RAGAS_CACHE_ENABLED: ${RAGAS_CACHE_ENABLED:-true}
+      RAGAS_ALLOW_SAME_MODEL_AS_TUTOR: ${RAGAS_ALLOW_SAME_MODEL_AS_TUTOR:-false}
+
+      QUALITY_GATE_DEFAULT_ABSOLUTE_TOLERANCE: ${QUALITY_GATE_DEFAULT_ABSOLUTE_TOLERANCE:-0.02}
+      QUALITY_GATE_DEFAULT_RELATIVE_TOLERANCE: ${QUALITY_GATE_DEFAULT_RELATIVE_TOLERANCE:-0.05}
+      LEARNING_QUALITY_MIN_COHORT_SIZE: ${LEARNING_QUALITY_MIN_COHORT_SIZE:-5}
+      LEARNING_QUALITY_MIN_RETENTION_DAYS: ${LEARNING_QUALITY_MIN_RETENTION_DAYS:-7}
+      LEARNING_QUALITY_MAX_RETENTION_DAYS: ${LEARNING_QUALITY_MAX_RETENTION_DAYS:-60}
+      QUALITY_ALLOW_PRODUCTION_SAMPLE_CAPTURE: ${QUALITY_ALLOW_PRODUCTION_SAMPLE_CAPTURE:-false}
+
+    ports:
+      - "127.0.0.1:${API_HOST_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    # Migrations are NOT run automatically - see the Dockerfile header
+    # comment and the README for the explicit `alembic upgrade head` step.
+
+  finquest-web:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_FINQUEST_API_BASE_URL: ${NEXT_PUBLIC_FINQUEST_API_BASE_URL:?NEXT_PUBLIC_FINQUEST_API_BASE_URL must be set}
+        NEXT_PUBLIC_APP_NAME: ${NEXT_PUBLIC_APP_NAME:-FinQuest}  
+    container_name: finquest-web
+    restart: unless-stopped
+    networks: [finquest-net]
+    depends_on:
+      finquest-api:
+        condition: service_healthy
+    environment:
+      HOSTNAME: 0.0.0.0
+
+      # Used only by server-side Next.js Route Handlers inside this container.
+      FINQUEST_API_INTERNAL_URL: http://finquest-api:8080
+
+      # Exact public origin of the learner-facing website.
+      FINQUEST_WEB_ORIGIN: ${FINQUEST_WEB_ORIGIN:?FINQUEST_WEB_ORIGIN must be set}
+
+      # Production authentication cookies may only travel over HTTPS.
+      AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-true}        
+    ports:
+      - "127.0.0.1:${WEB_HOST_PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  finquest-worker-market:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: base
+    container_name: finquest-worker-market
+    restart: unless-stopped
+    networks: [finquest-net]
+    depends_on:
+      stock-db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment: &worker-env
+      # PostgreSQL
+      DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER:?POSTGRES_USER must be set}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@stock-db:5432/${POSTGRES_DB:?POSTGRES_DB must be set}"
+      DATABASE_ECHO: ${DATABASE_ECHO:-false}
+      DATABASE_POOL_SIZE: ${DATABASE_POOL_SIZE:-5}
+      DATABASE_MAX_OVERFLOW: ${DATABASE_MAX_OVERFLOW:-10}
+
+      # Production runtime
+      FINQUEST_ENV: ${FINQUEST_ENV:-production}
+      ALLOW_FAKE_EMBEDDINGS_IN_PRODUCTION: ${ALLOW_FAKE_EMBEDDINGS_IN_PRODUCTION:-false}
+
+      # Embedding configuration
+      #
+      # Non-knowledge workers construct the lightweight adapter but never load
+      # the model unless an embedding operation is actually executed.
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-sentence_transformer}
+      EMBEDDING_MODEL_NAME: ${EMBEDDING_MODEL_NAME:-sentence-transformers/all-MiniLM-L6-v2}
+      EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-384}
+      EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE:-32}
+
+      # Redis and Celery
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      CELERY_WORKER_PREFETCH_MULTIPLIER: ${CELERY_WORKER_PREFETCH_MULTIPLIER:-1}
+      CELERY_TASK_ACKS_LATE: ${CELERY_TASK_ACKS_LATE:-true}
+
+      # Metrics and tracing
+      METRICS_ENABLED: ${METRICS_ENABLED:-true}
+      OTEL_ENABLED: ${OTEL_ENABLED:-false}
+      OTEL_SERVICE_NAME: finquest-worker
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
+      OTEL_SAMPLE_RATIO: ${OTEL_SAMPLE_RATIO:-0.1}    
+    # Low bounded concurrency: each task makes outbound market-data-provider
+    # calls, so this queue is I/O-bound but rate-sensitive against the
+    # upstream provider.
+    command: >
+      celery -A stock_research_core.infrastructure.operations.celery_tasks worker
+      --loglevel=info
+      -Q finquest.market
+      --concurrency=1
+      -n worker-market@%h    
+    healthcheck:
+      test: ["CMD", "python", "-m", "stock_research_core.cli.worker_status"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 20s
+
+  finquest-worker-portfolio:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: base
+    container_name: finquest-worker-portfolio
+    restart: unless-stopped
+    networks: [finquest-net]
+    depends_on:
+      stock-db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment: *worker-env
+    # Moderate bounded concurrency: valuation is CPU-light (pandas over
+    # already-stored bars), so more headroom than market/knowledge.
+    command: >
+      celery -A stock_research_core.infrastructure.operations.celery_tasks worker
+      --loglevel=info -Q finquest.portfolio --concurrency=1 -n worker-portfolio@%h
+    healthcheck:
+      test: ["CMD", "python", "-m", "stock_research_core.cli.worker_status"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 20s
+
+  finquest-worker-knowledge:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # Override to `ai` (`docker compose build --build-arg` or edit this
+      # line) for real sentence-transformer embeddings; `base` works fine
+      # with the default deterministic_fake provider.
+      target: ai
+    container_name: finquest-worker-knowledge
+    restart: unless-stopped
+    networks: [finquest-net]
+    depends_on:
+      stock-db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      <<: *worker-env
+
+      # This worker also serves the finquest.evaluation queue.
+      QUALITY_EVALUATION_MODE: ${QUALITY_EVALUATION_MODE:-DETERMINISTIC}
+
+      RAGAS_ENABLED: ${RAGAS_ENABLED:-false}
+      RAGAS_EVALUATOR_PROVIDER: ${RAGAS_EVALUATOR_PROVIDER:-openai_compatible}
+      RAGAS_EVALUATOR_BASE_URL: "${RAGAS_EVALUATOR_BASE_URL:-}"
+      RAGAS_EVALUATOR_API_KEY: "${RAGAS_EVALUATOR_API_KEY:-}"
+      RAGAS_EVALUATOR_MODEL: "${RAGAS_EVALUATOR_MODEL:-}"
+      RAGAS_EMBEDDING_PROVIDER: ${RAGAS_EMBEDDING_PROVIDER:-existing_finquest}
+      RAGAS_MAX_CONCURRENCY: ${RAGAS_MAX_CONCURRENCY:-2}
+      RAGAS_TIMEOUT_SECONDS: ${RAGAS_TIMEOUT_SECONDS:-120}
+      RAGAS_MAX_RETRIES: ${RAGAS_MAX_RETRIES:-2}
+      RAGAS_MAX_SAMPLES_PER_RUN: ${RAGAS_MAX_SAMPLES_PER_RUN:-200}
+      RAGAS_CACHE_ENABLED: ${RAGAS_CACHE_ENABLED:-true}
+      RAGAS_ALLOW_SAME_MODEL_AS_TUTOR: ${RAGAS_ALLOW_SAME_MODEL_AS_TUTOR:-false}
+
+      QUALITY_GATE_DEFAULT_ABSOLUTE_TOLERANCE: ${QUALITY_GATE_DEFAULT_ABSOLUTE_TOLERANCE:-0.02}
+      QUALITY_GATE_DEFAULT_RELATIVE_TOLERANCE: ${QUALITY_GATE_DEFAULT_RELATIVE_TOLERANCE:-0.05}
+
+      LEARNING_QUALITY_MIN_COHORT_SIZE: ${LEARNING_QUALITY_MIN_COHORT_SIZE:-5}
+      LEARNING_QUALITY_MIN_RETENTION_DAYS: ${LEARNING_QUALITY_MIN_RETENTION_DAYS:-7}
+      LEARNING_QUALITY_MAX_RETENTION_DAYS: ${LEARNING_QUALITY_MAX_RETENTION_DAYS:-60}
+
+      QUALITY_ALLOW_PRODUCTION_SAMPLE_CAPTURE: ${QUALITY_ALLOW_PRODUCTION_SAMPLE_CAPTURE:-false}        
+    # Low concurrency: embeddings (real or fake) and chunking are
+    # CPU/RAM-intensive per document. The evaluation queue is served by
+    # this same worker (both are knowledge-base-adjacent, low-volume,
+    # and neither needs its own dedicated process in this phase).
+    command: >
+      celery -A stock_research_core.infrastructure.operations.celery_tasks worker
+      --loglevel=info
+      -Q finquest.knowledge,finquest.evaluation
+      --concurrency=1
+      -n worker-knowledge@%h    
+    healthcheck:
+      test: ["CMD", "python", "-m", "stock_research_core.cli.worker_status"]
+      interval: 30s
+      timeout: 20s
+      retries: 5
+      start_period: 30s
+
+  finquest-worker-default:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: base
+    container_name: finquest-worker-default
+    restart: unless-stopped
+    networks: [finquest-net]
+    depends_on:
+      stock-db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment: *worker-env
+    command: >
+      celery -A stock_research_core.infrastructure.operations.celery_tasks worker
+      --loglevel=info -Q finquest.default --concurrency=1 -n worker-default@%h
+    healthcheck:
+      test: ["CMD", "python", "-m", "stock_research_core.cli.worker_status"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  stock_db_data:

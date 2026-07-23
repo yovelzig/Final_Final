@@ -1,0 +1,11 @@
+* text=auto
+
+# Linux and Docker configuration files must use LF
+*.sh text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+Dockerfile text eol=lf
+
+# Environment templates are parsed on Linux
+.env.example text eol=lf
+.env.production.example text eol=lf
