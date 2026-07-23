@@ -238,7 +238,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      target: base
+      target: ai
     container_name: finquest-worker-market
     restart: unless-stopped
     networks: [finquest-net]
@@ -300,7 +300,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      target: base
+      target: ai
     container_name: finquest-worker-portfolio
     restart: unless-stopped
     networks: [finquest-net]
@@ -386,7 +386,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      target: base
+      target: ai
     container_name: finquest-worker-default
     restart: unless-stopped
     networks: [finquest-net]
