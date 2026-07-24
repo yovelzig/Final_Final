@@ -269,14 +269,14 @@ Legend for **Production risk**: 🟢 low · 🟡 medium · 🔴 high.
 
 | Target capability | Existing implementation | Reusable as-is | Requires extension | Requires replacement | Missing | Prod risk | Recommended stage |
 |---|---|---|---|---|---|---|---|
-| Docker / production Compose | 8 services, identical names local vs. prod, no beat/Flower | ✅ structure | worker health contracts, base/ai image targets (per user's own Stage 2 description) | — | — | 🟡 | 2 |
+| Docker / production Compose | 8 services, identical names local vs. prod, no beat/Flower; worker health contracts and base/ai image targets corrected in Phase A2 (`finquest-api`/`finquest-worker-knowledge` on `ai`, `finquest-worker-market`/`-portfolio`/`-default` on `base`, knowledge-only `--require-embedding` healthcheck) | ✅ | — | — | — | 🟢 | A2 (done) |
 | Configuration | pydantic-settings throughout, consistent pattern, feature flags default-safe | ✅ | — | — | — | 🟢 | ongoing |
 | Security | Argon2, opaque refresh + family revocation, security headers middleware, correlation IDs | ✅ | — | — | — | 🟢 | ongoing |
 | Observability | Prometheus + OTel (opt-in) + structlog, all real | ✅ | enable OTel by default in later stage if desired | — | — | 🟢 | ongoing |
 | Tests | 1165 backend unit + 64 integration files + 154 frontend tests, layered pyramid both sides | ✅ | add tests for Ollama-real-endpoint path, misconception detection once built | — | ruff/mypy/black/CI entirely absent | 🟡 (no CI gate today) | 1 (tooling), ongoing |
 | Documentation | this Stage 0 set + extensive README | ✅ | keep in sync as stages land | — | — | 🟢 | ongoing |
 | Deployment | manual EC2 git-pull + compose, documented | ✅ pattern | see runbook | — | — | 🟡 | ongoing |
-| Backup and restore | not automated; runbook already requires a verified manual backup before every migration/data transformation | — | Stage 2 adds a repeatable backup helper/runbook command | — | full automated retention/off-server pipeline + restore drill | 🔴 (until proven) | 2 (helper), 10 (automation + drill) |
+| Backup and restore | Phase A2 added `scripts/backup_production_database.sh` (verified `pg_dump -F c` → temp file → `pg_restore --list` verify → atomic rename) and a documented restore command in the runbook; syntax-validated locally, **not yet executed/verified on the real EC2 database** | ✅ helper exists | — | — | full automated retention/off-server pipeline + a real restore drill | 🟡 (until exercised on EC2) | A2 (helper, done); 10 (automation + drill) |
 
 ---
 

@@ -30,6 +30,8 @@ COPY alembic.ini ./alembic.ini
 
 RUN pip install --no-cache-dir .
 
+COPY scripts ./scripts
+
 RUN useradd --create-home --uid 1000 finquest \
     && chown -R finquest:finquest /app
 
@@ -43,16 +45,25 @@ CMD ["uvicorn", "stock_research_core.api.main:app", "--host", "0.0.0.0", "--port
 
 # -- ai: adds the real local sentence-transformer embedding dependency -----------------------------------------------
 #
-# Deliberately a separate stage, never built by default - `base` (above)
-# stays a small, network-free image for API/market/portfolio/evaluation
-# workers. Only the knowledge worker (or an API deployment that wants
-# real semantic embeddings) needs this stage:
+# Deliberately a separate stage - `base` (above) stays a small,
+# network-free image with no `sentence-transformers`/torch. Production
+# builds `finquest-api` and `finquest-worker-knowledge` on this `ai`
+# stage (the API process and the only worker whose queues -
+# finquest.knowledge / finquest.evaluation - ever call an embedding
+# provider); `finquest-worker-market`, `finquest-worker-portfolio`, and
+# `finquest-worker-default` build on `base`, since none of their job
+# handlers touch embeddings (see docker-compose.production.yml).
 #
-#   docker compose build --build-arg TARGET=ai finquest-worker-knowledge
-#   (or, equivalently, `docker compose --profile ai build finquest-worker-knowledge`
-#   with the `target: ai` override already set on that service below)
+# CPU-only PyTorch, pinned and explicit: the production EC2 host is
+# CPU-only, but `pip install sentence-transformers` alone resolves an
+# unpinned torch build from PyPI's default index, which today means the
+# CUDA/NVIDIA-bundled wheel (~9GB of nvidia-*/triton packages this host
+# can never use). Installing a pinned `+cpu` wheel from PyTorch's own CPU
+# index *before* `.[ai_tutor]` satisfies sentence-transformers' torch
+# requirement without ever resolving the CUDA build.
 FROM base AS ai
 USER root
+RUN pip install --no-cache-dir torch==2.13.0+cpu --index-url https://download.pytorch.org/whl/cpu
 RUN pip install --no-cache-dir ".[ai_tutor]"
 USER finquest
 CMD ["uvicorn", "stock_research_core.api.main:app", "--host", "0.0.0.0", "--port", "8080"]

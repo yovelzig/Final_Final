@@ -1,18 +1,28 @@
 """Worker health/readiness CLI - a lightweight, bounded check suitable for
 a Docker `HEALTHCHECK` command. Checks PostgreSQL, Redis, the Celery
-broker, the job registry (fails fast if misconfigured), the required
-queues, and embedding-provider configuration for knowledge workers.
-Never runs an expensive job, never downloads a model.
+broker, and the job registry (fails fast if misconfigured), and reports
+the required queues. Never runs an expensive job, never downloads a
+model.
 
 Usage (PowerShell):
 
     python -m stock_research_core.cli.worker_status
+    python -m stock_research_core.cli.worker_status --require-embedding
+
+By default the embedding provider is *not* checked - most workers
+(market/portfolio/default) never call it, and may be built on the `base`
+image without `sentence-transformers` installed at all. Pass
+`--require-embedding` (used by the knowledge worker's healthcheck, the
+only worker whose queues call an embedding provider) to also validate
+that the configured embedding provider is production-safe and
+initializable - still without downloading or loading a model.
 
 Exit code 0 = healthy, 1 = unhealthy (prints which check(s) failed).
 """
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import sys
 
@@ -96,7 +106,7 @@ async def _check_registry(database_settings: DatabaseSettings, embedding_setting
         await engine.dispose()
 
 
-async def main_async() -> int:
+async def main_async(*, require_embedding: bool = False) -> int:
     database_settings = DatabaseSettings()
     operations_settings = OperationsSettings()
     embedding_settings = EmbeddingSettings()
@@ -118,24 +128,27 @@ async def main_async() -> int:
     queues_ok = True
     checks.append(("Required queues", queues_ok, ", ".join(ALL_QUEUES)))
 
-    embedding_status = describe_embedding_provider_status(
-        embedding_settings=embedding_settings, operations_settings=operations_settings
-    )
-    # `production_approved` describes the *provider choice* in the
-    # abstract (deterministic_fake is never production-approved on its
-    # own merits) - only actually fail this health check when the
-    # process is really running in production; deterministic_fake in
-    # test/development is expected and healthy.
-    is_production = operations_settings.finquest_env.value == "production"
-    embedding_ok = bool(embedding_status["initializable"]) and (
-        not is_production or bool(embedding_status["production_approved"])
-    )
-    checks.append((
-        "Embedding provider",
-        embedding_ok,
-        f"provider={embedding_status['provider']} environment={embedding_status['environment']} "
-        f"production_approved={embedding_status['production_approved']} initializable={embedding_status['initializable']}",
-    ))
+    if not require_embedding:
+        checks.append(("Embedding provider", True, "not required for this worker"))
+    else:
+        embedding_status = describe_embedding_provider_status(
+            embedding_settings=embedding_settings, operations_settings=operations_settings
+        )
+        # `production_approved` describes the *provider choice* in the
+        # abstract (deterministic_fake is never production-approved on its
+        # own merits) - only actually fail this health check when the
+        # process is really running in production; deterministic_fake in
+        # test/development is expected and healthy.
+        is_production = operations_settings.finquest_env.value == "production"
+        embedding_ok = bool(embedding_status["initializable"]) and (
+            not is_production or bool(embedding_status["production_approved"])
+        )
+        checks.append((
+            "Embedding provider",
+            embedding_ok,
+            f"provider={embedding_status['provider']} environment={embedding_status['environment']} "
+            f"production_approved={embedding_status['production_approved']} initializable={embedding_status['initializable']}",
+        ))
 
     overall_ok = all(ok for _, ok, _ in checks)
     for name, ok, detail in checks:
@@ -144,8 +157,24 @@ async def main_async() -> int:
     return 0 if overall_ok else 1
 
 
+def _build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="python -m stock_research_core.cli.worker_status",
+        description="Bounded worker health/readiness check suitable for a Docker HEALTHCHECK command.",
+    )
+    parser.add_argument(
+        "--require-embedding",
+        action="store_true",
+        help="Also validate that the configured embedding provider is production-safe and "
+        "initializable. Use only for workers whose queues call an embedding provider "
+        "(the knowledge worker). Never downloads or loads a model.",
+    )
+    return parser
+
+
 def main() -> None:
-    sys.exit(asyncio.run(main_async()))
+    args = _build_arg_parser().parse_args()
+    sys.exit(asyncio.run(main_async(require_embedding=args.require_embedding)))
 
 
 if __name__ == "__main__":

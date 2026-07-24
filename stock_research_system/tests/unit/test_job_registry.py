@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from stock_research_core.application.operations.job_registry import (
+    _JOB_TYPE_CONFIG,
     BackgroundJobRegistry,
     ExponentialBackoffRetryPolicy,
     FixedScheduleRetryPolicy,
@@ -102,6 +103,45 @@ class TestBuildDefaultRegistry:
         assert JobTriggerSource.API not in entry.allowed_trigger_sources
         assert JobTriggerSource.N8N not in entry.allowed_trigger_sources
         assert JobTriggerSource.ADMIN_CLI in entry.allowed_trigger_sources
+
+
+class TestEmbeddingDependentJobRouting:
+    """Regression guard for the Phase A2 base/ai image split: `finquest-worker-default`,
+    `finquest-worker-market`, and `finquest-worker-portfolio` build on the `base` image
+    (no `sentence-transformers`), so no job type that calls an embedding provider may ever
+    be routed to `finquest.default`, `finquest.market`, or `finquest.portfolio`.
+
+    This test locks the currently audited embedding-dependent job types to the
+    knowledge/evaluation queues. Any future job that introduces an embedding dependency
+    must update this audited set and its routing-contract test as part of the same change.
+    """
+
+    _EMBEDDING_DEPENDENT_JOB_TYPES = frozenset({
+        BackgroundJobType.CURRICULUM_KNOWLEDGE_REFRESH,
+        BackgroundJobType.LOCAL_DOCUMENT_INGESTION,
+        BackgroundJobType.KNOWLEDGE_REEMBED,
+        BackgroundJobType.RETRIEVAL_EVALUATION,
+        BackgroundJobType.RAGAS_QUALITY_EVALUATION,
+        BackgroundJobType.QUALITY_BASELINE_COMPARISON,
+    })
+    _BASE_IMAGE_QUEUES = frozenset({"finquest.default", "finquest.market", "finquest.portfolio"})
+    _AI_IMAGE_QUEUES = frozenset({"finquest.knowledge", "finquest.evaluation"})
+
+    def test_embedding_dependent_job_types_are_routed_only_to_knowledge_or_evaluation(self) -> None:
+        for job_type in self._EMBEDDING_DEPENDENT_JOB_TYPES:
+            queue_name = _JOB_TYPE_CONFIG[job_type][0]
+            assert queue_name in self._AI_IMAGE_QUEUES, (
+                f"{job_type} touches embeddings but is routed to {queue_name!r}, "
+                f"not one of {sorted(self._AI_IMAGE_QUEUES)}"
+            )
+
+    def test_base_image_queues_never_carry_an_embedding_dependent_job(self) -> None:
+        for job_type, (queue_name, *_rest) in _JOB_TYPE_CONFIG.items():
+            if queue_name in self._BASE_IMAGE_QUEUES:
+                assert job_type not in self._EMBEDDING_DEPENDENT_JOB_TYPES, (
+                    f"{job_type} is routed to base-image queue {queue_name!r} but is in the "
+                    "audited embedding-dependent set"
+                )
 
 
 class TestFixedScheduleRetryPolicy:
