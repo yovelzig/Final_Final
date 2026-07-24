@@ -37,12 +37,14 @@ from stock_research_core.infrastructure.ai_tutor.config import EmbeddingSettings
 from stock_research_core.infrastructure.ai_tutor.deterministic_fake_embeddings import (
     DeterministicFakeEmbeddingAdapter,
 )
+from stock_research_core.infrastructure.ai_tutor.production_safety import UnsafeEmbeddingProviderConfigurationError
 from stock_research_core.infrastructure.ai_tutor.sentence_transformer_embeddings import (
     SentenceTransformerEmbeddingAdapter,
 )
 from stock_research_core.infrastructure.database.config import DatabaseSettings
 from stock_research_core.infrastructure.database.engine import create_database_engine, create_session_factory
 from stock_research_core.infrastructure.database.unit_of_work import SqlAlchemyUnitOfWork
+from stock_research_core.infrastructure.operations.config import FinquestEnv, OperationsSettings
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
@@ -60,6 +62,27 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _validate_seed_embedding_safety(
+    *, use_real_embeddings: bool, operations_settings: OperationsSettings
+) -> str | None:
+    """Returns a warning message to print if fake embeddings are running under an
+    explicit production override, or None if there's nothing to warn about.
+    Raises UnsafeEmbeddingProviderConfigurationError if fake embeddings are
+    configured in production without that override."""
+    if use_real_embeddings or operations_settings.finquest_env != FinquestEnv.PRODUCTION:
+        return None
+    if not operations_settings.allow_fake_embeddings_in_production:
+        raise UnsafeEmbeddingProviderConfigurationError(
+            "Fake embeddings are not allowed with FINQUEST_ENV=production. Pass --real-embeddings "
+            "for normal production use, or set ALLOW_FAKE_EMBEDDINGS_IN_PRODUCTION=true if this is "
+            "a deliberate, reviewed exception."
+        )
+    return (
+        "WARNING: ALLOW_FAKE_EMBEDDINGS_IN_PRODUCTION=true - seeding production with fake, "
+        "non-semantic embeddings. This is a reviewed exception, not normal production behavior."
+    )
+
+
 def _build_embedding_provider(*, use_real_embeddings: bool) -> EmbeddingPort:
     if not use_real_embeddings:
         return DeterministicFakeEmbeddingAdapter()
@@ -72,9 +95,17 @@ def _build_embedding_provider(*, use_real_embeddings: bool) -> EmbeddingPort:
 
 
 async def _run(args: argparse.Namespace) -> int:
-    settings = DatabaseSettings()
-    engine = create_database_engine(settings)
+    engine = None
     try:
+        operations_settings = OperationsSettings()
+        warning = _validate_seed_embedding_safety(
+            use_real_embeddings=args.real_embeddings, operations_settings=operations_settings
+        )
+        if warning:
+            print(warning, file=sys.stderr)
+
+        settings = DatabaseSettings()
+        engine = create_database_engine(settings)
         session_factory = create_session_factory(engine)
         uow_factory = lambda: SqlAlchemyUnitOfWork(session_factory)  # noqa: E731
 
@@ -105,7 +136,8 @@ async def _run(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     finally:
-        await engine.dispose()
+        if engine is not None:
+            await engine.dispose()
 
 
 def main() -> None:

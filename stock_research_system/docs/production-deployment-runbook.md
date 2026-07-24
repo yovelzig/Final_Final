@@ -69,7 +69,7 @@ Every `docker compose ...` invocation against production in this runbook is writ
 
 1. **Verify clean working tree** on the EC2 checkout: `git status` must show no uncommitted local changes before pulling. If it doesn't, stop and investigate — someone may have made an undocumented hotfix (or a documentation edit — see §4) directly on the server, which itself is a process violation to flag, not silently overwrite.
 2. **Record the current commit** (`git rev-parse HEAD`) before doing anything else — this is the rollback target if the deploy needs to be reverted.
-3. **Create a backup when required** (any migration, any data transformation, any Stage marked "requires backup" in `migration-status.md`): a `pg_dump` of the production database to a location outside the container/host's ephemeral storage, timestamped and named with the pre-deploy commit SHA for traceability. See §6 for the current state of backup tooling.
+3. **Create a backup when required** (any migration, any data transformation, any Stage marked "requires backup" in `migration-status.md`): run `./scripts/backup_production_database.sh` (see §5 for the full procedure) — a verified `pg_dump -F c` of the production database, timestamped and named with the pre-deploy commit SHA, stored outside the container/host's ephemeral storage.
 4. **Fetch and pull `main` with `--ff-only`**: `git fetch origin && git pull --ff-only origin main`. A non-fast-forward result means the local EC2 checkout has diverged — stop and investigate before forcing anything.
 5. **Validate Compose** before touching running services: `dc config` (catches YAML/interpolation errors without starting anything).
 6. **Run migrations explicitly**, as a separate, observable step — never implicitly via a service's own startup code: `dc exec finquest-api python -m alembic upgrade head` (or an equivalent one-off run if `finquest-api` isn't already up on the new image). Confirm with `dc exec finquest-api python -m alembic current` afterward.
@@ -117,7 +117,41 @@ A direct `git checkout <previous-commit>` on the EC2 host **may** be used, but o
 - Required before: any Alembic migration, any bulk data transformation/seed script run against production, any Stage explicitly marked as touching schema in `migration-status.md`.
 - A backup is not "required before every deploy" if a given deploy is pure application-code-with-no-migration — but when in doubt, take one; it is cheap relative to the cost of an unrecoverable mistake.
 - Backups must be stored outside the container/host's own ephemeral disk (i.e., not just inside the `stock-db` container's writable layer).
-- **Current state (accurate as of Stage 0):** the runbook already *requires* a verified manual backup before every production migration or data transformation (the process described above) — but **no backup automation exists in this repository today** (confirmed in Stage 0 — see `architecture-migration-plan.md` risk table, "current data-loss risk"). **Stage 2** should define or add a repeatable backup helper/runbook command (e.g., a documented `pg_dump` one-liner or script, not necessarily a cron job) — this must exist and be exercised at least once **before Stage 3's knowledge-base ingestion** runs against production, since that is the first stage that writes a meaningful volume of new data. A full **automated** retention/off-server backup pipeline and a verified restore drill remain in scope no later than **Stage 10**. Do not read this runbook as claiming backup automation is implemented today — it is not.
+
+### Backup procedure (Phase A2)
+
+Run from the EC2 host, from the `stock_research_system` checkout root (same directory as the `dc()` helper in §2):
+
+```bash
+./scripts/backup_production_database.sh
+```
+
+This EC2-host operator script (`scripts/backup_production_database.sh` — copied into both the `base` and `ai` Docker images as part of `scripts/`, like every other operator/seed script, but **must not be invoked from inside an application container**: it calls `docker compose exec` against `stock-db`, which requires the Docker CLI and a working `docker compose` context that application containers don't have. Not run automatically by any deploy step — run it directly on the EC2 host. **CI never executes the backup operation and never contacts Docker or PostgreSQL** — this repository's unit tests invoke only `--help` and the pre-Docker argument/commit/directory validation paths, all of which exit before Docker is ever touched):
+
+- always invokes `docker compose --env-file .env -f docker-compose.production.yml ...`, never a bare `docker compose` call;
+- never sources or prints `.env`; reads `POSTGRES_USER`/`POSTGRES_DB` from the running `stock-db` container's own environment via `docker compose exec -T stock-db sh -c 'exec pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -F c'`, never copying them into a host variable;
+- validation runs in a deliberate order so everything Git-only is checked before anything that needs `.env`/Docker: (1) resolve/validate `--source-commit`, (2) resolve the checkout root and backup directory, (3) reject a backup directory inside the checkout, (4) check `.env` exists, (5) check `docker-compose.production.yml` exists, (6) only then access Docker and check `stock-db` health;
+- accepts an optional `--source-commit SHA_OR_REF` (default `HEAD`), resolved and validated with `git rev-parse --verify "<ref>^{commit}"` — its first 12 characters go into the backup filename. Only needed on the first A2 deployment (see above); every other deployment can rely on the default;
+- accepts an optional `--backup-dir DIR` (default `/home/ubuntu/backups/finquest`) — **enforced**, not just documented: resolved via `git rev-parse --show-toplevel` + `realpath -m` and rejected if it is equal to, or nested under, the Git checkout root;
+- both `--backup-dir` and `--source-commit` reject a missing or empty value with a clear message and exit code `2`, rather than letting `set -u` surface a raw unbound-variable error;
+- writes the dump to a host-side temporary file (mode `600`) in the backup directory (mode `700`) by redirecting the container command's stdout — the dump itself is created on the host, not inside the container;
+- **verifies before trusting**: pipes that temporary host file into `docker compose exec -T stock-db pg_restore --list` via stdin redirect (never passes a host path as an argument to a command running inside the container) — the file stays named `*.tmp` until this verification succeeds;
+- **never overwrites an existing backup**: rejects the final filename if it already exists, then performs a no-clobber (`mv -n`) rename and confirms the temp file is actually gone afterward — if a same-named backup already existed, the existing final backup is left completely untouched, the refused temporary dump is removed by the `EXIT` cleanup trap (since `tmp_file` is only cleared after a *confirmed successful* rename), and the script exits non-zero rather than silently keeping stale state or silently losing the new dump;
+- only after verification succeeds *and* the destination is confirmed clear, atomically renames the temp file to its final `stock_db_<UTC-timestamp>_<source-commit-12-chars>.dump` name (mode `600`); `trap cleanup EXIT` deletes an incomplete temp file on any failure, and `INT`/`TERM` each `exit` with their conventional 128+signal status (130/143) so an interrupt always still terminates and triggers that same `EXIT` cleanup — `tmp_file` is cleared only once the rename is confirmed successful, so cleanup can never delete a completed backup;
+- never runs `docker compose down -v`; never deletes old backups (retention/cleanup is a separate, explicit, future operator action, not part of this script);
+- validates `.env`, `docker-compose.production.yml`, and that `stock-db` reports `healthy` before doing anything.
+
+**Restore** (documented separately — the backup script does not restore) — from the same directory, given a verified `.dump` file at `$BACKUP_FILE`:
+
+```bash
+dc exec -T stock-db sh -c \
+  'exec pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --clean --if-exists' \
+  < "$BACKUP_FILE"
+```
+
+Run this only against a deliberately targeted database (a fresh restore target or a confirmed rollback scenario per §4) — `--clean --if-exists` drops existing objects before recreating them from the dump. As with backup, `POSTGRES_USER`/`POSTGRES_DB` are resolved **inside the container shell**, from `stock-db`'s own environment — never exported to, or expanded by, the host shell.
+
+**Current state (accurate as of Phase A2):** the script above has been added, has passed local syntax validation (`bash -n scripts/backup_production_database.sh`), and has **not** been executed or verified against the real production database on EC2 — that remains a required human action before it can be relied on. Do not read this runbook as claiming a production backup exists until an operator has actually run and verified it on EC2. A full **automated** retention/off-server backup pipeline and a verified restore drill remain future work, out of scope for Phase A2.
 
 ---
 
@@ -125,7 +159,7 @@ A direct `git checkout <previous-commit>` on the EC2 host **may** be used, but o
 
 | Stage | What changed | Smoke test |
 |---|---|---|
-| 2 | Worker health/image targets | `dc exec finquest-worker-market python -m stock_research_core.cli.worker_status` (repeat per worker) |
+| A2 | Worker health/image targets | `dc exec finquest-worker-market python -m stock_research_core.cli.worker_status` (repeat for `-portfolio`, `-default`); `dc exec finquest-worker-knowledge python -m stock_research_core.cli.worker_status --require-embedding` for the knowledge worker specifically (confirms it, and only it, checks embedding-provider readiness) |
 | 3 | Knowledge Base corpus | Ask the tutor a question whose answer requires the newly ingested content; confirm citations reference the new documents |
 | 4 | Ollama tutor | Ask a real tutor question; confirm the response is grounded, cited, and did not silently fall back to the extractive tutor (check `tutor_model_provider` in the response metadata / logs) |
 | 5 | Sufficiency gate | Ask a question with no supporting knowledge; confirm a clean abstention, not a hallucinated answer |
@@ -137,7 +171,51 @@ A direct `git checkout <previous-commit>` on the EC2 host **may** be used, but o
 
 ---
 
-## 7. What Must Never Happen (repeated for emphasis)
+## 7. Phase A2 — Image-Target & Worker-Health Deployment Notes
+
+Phase A2 corrects five services' build targets and two files' health-check/safety behavior; it changes no product behavior, no database schema, and no environment-variable names. Deploying it follows the standard flow in §3 with these specifics:
+
+- **Services affected**: `finquest-api` (target unchanged, `ai`), `finquest-worker-knowledge` (target unchanged, `ai`; healthcheck now includes `--require-embedding`), `finquest-worker-market`, `finquest-worker-portfolio`, `finquest-worker-default` (target changes from `ai` to `base` — these three lose `sentence-transformers`/torch from their image, which their job handlers never used).
+- **No frontend rebuild required** — `finquest-web` is untouched by this phase.
+- **No Alembic migration** — Phase A2 makes no schema change; skip §3 EC2 step 6.
+- **No database reset** — `stock_db_data` is untouched; a backup per §5 is still good practice before any deploy that touches worker images, but is not required by a migration here.
+- **First A2 deployment ordering — the backup script does not exist yet on the currently-deployed pre-A2 commit, and `git pull` moves `HEAD` before the backup can run.** `scripts/backup_production_database.sh` is a *new* file introduced by this phase, so §3 EC2 step 3 (backup) cannot run before step 4 (pull) on this specific deploy — there is nothing to run yet. Because of that, `HEAD` at the moment the backup script finally runs will already be the *new* A2 commit, even though the still-running containers and database are still on the *old* pre-A2 commit — labeling the backup with `HEAD` (the script's default) would mislabel it. Capture the pre-deploy commit first and pass it explicitly via `--source-commit`. For this one deployment only, follow this order instead of the usual §3 sequence:
+
+  ```bash
+  PRE_DEPLOY_COMMIT="$(git rev-parse HEAD)"
+  git fetch origin
+  git pull --ff-only origin main
+  bash -n scripts/backup_production_database.sh
+  ./scripts/backup_production_database.sh \
+    --source-commit "$PRE_DEPLOY_COMMIT"
+  ```
+
+  1. Verify clean checkout (§3 step 1).
+  2. `PRE_DEPLOY_COMMIT="$(git rev-parse HEAD)"` — record the current (pre-A2) commit into a variable, not just print it (§3 step 2's usual `git rev-parse HEAD` alone isn't enough here, since it's needed again a few steps later).
+  3. `git fetch origin && git pull --ff-only origin main` (§3 step 4) — pulling source code alone does not touch the running containers or the database, so this is safe to do before backing up.
+  4. `bash -n scripts/backup_production_database.sh` on the newly-pulled script, to confirm it's syntactically sound on this host before relying on it.
+  5. Optionally run `./scripts/backup_production_database.sh --source-commit "$PRE_DEPLOY_COMMIT"` now that the script exists in the checkout (still against the old, still-running containers — safe, since nothing has been rebuilt or recreated yet) — passing `--source-commit` here labels the backup with the commit the running database actually corresponds to, not the newly-pulled `HEAD`.
+  6. Validate Compose (§3 step 5).
+  7. Build and recreate services (the sequential-build block below, then §3 steps 7-8).
+
+  Every A2-or-later deployment *after* this first one can follow the normal §3 order and omit `--source-commit` (its default, `HEAD`, is already correct once the backup script itself predates the commit being deployed).
+- **Sequential builds only**, with `COMPOSE_PARALLEL_LIMIT=1` exported for the EC2 shell session, so the five affected image builds never contend for the host's limited CPU/memory simultaneously:
+
+  ```bash
+  export COMPOSE_PARALLEL_LIMIT=1
+  dc build finquest-api
+  dc build finquest-worker-knowledge
+  dc build finquest-worker-default
+  dc build finquest-worker-market
+  dc build finquest-worker-portfolio
+  ```
+- **Recreate only the five affected services** (`dc up -d --no-deps <service>` per §3 EC2 step 8) — never `finquest-web`, `stock-db`, or `redis`.
+- **Verify all worker health states** after recreation (`dc ps` — all `healthy`), then confirm the knowledge worker specifically requires embeddings and the other three don't (see the A2 row in §6's smoke-test table) — this is the behavioral difference this phase introduces and the one worth checking explicitly, not just "container is up."
+- **Rollback**: standard Git-revert path (§4) — revert the branch's commits, rebuild the same five services (now back on their prior `ai` targets and prior healthcheck commands from the reverted Dockerfile/Compose files), recreate them. No migration downgrade step applies (none ran).
+
+---
+
+## 8. What Must Never Happen (repeated for emphasis)
 
 - No SSH session, migration, or deploy command from Claude Code against the real EC2 host.
 - No committed `.env`/secret file.
