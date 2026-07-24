@@ -41,8 +41,9 @@ No secrets or `.env` values are recorded anywhere in this document or its siblin
 | File | Purpose |
 |---|---|
 | `docker-compose.yml` | Local development stack |
-| `docker-compose.yml.backup` | Backup of a prior local compose revision. **Tracked in git** (confirmed via `git ls-files --error-unmatch stock_research_system/docker-compose.yml.backup`, which exits 0 and lists the path — committed in the initial commit). See `deprecation-removal-plan.md` §4 for the full disposition. |
 | `docker-compose.production.yml` | Production stack (the one deployed to EC2) |
+
+> **Phase A1 addendum:** `docker-compose.yml.backup` (described in this table as of the Stage 0 baseline) was deleted in Phase A1 via `git rm`, after confirming its only difference from `docker-compose.yml` — a missing `HOSTNAME: 0.0.0.0` line — was an intentional, already-adopted change. See `deprecation-removal-plan.md` §4 for the resolved disposition.
 
 **Local Compose services** (`docker-compose.yml`): `stock-db`, `redis`, `finquest-api`, `finquest-web`, `finquest-worker-market`, `finquest-worker-portfolio`, `finquest-worker-knowledge`, `finquest-worker-default`.
 
@@ -227,6 +228,8 @@ All commands below were **executed** during Stage 0 against the local repository
 2. `tests/unit/test_openapi_snapshot.py::test_openapi_tags_match_the_expected_contract` — same root cause: actual tag set includes `'Learning Coach'`, not yet added to the test's expected-tag allowlist.
 
 Both are a **test-fixture drift issue** (the LangGraph coach router was added to the app but the hand-maintained OpenAPI snapshot test wasn't updated alongside it), not an application defect. Per the Stage 0 non-destructive rule, this was **not fixed** — fixing it would mean editing a test file's expectations, which is itself a judgment call about desired API surface, appropriately deferred to a later stage.
+
+> **Phase A1 correction note:** the true root cause was narrower than described above. `create_app()`'s `LangGraphSettings` default reads `.env`, and `stock_research_system/.env` — confirmed gitignored/untracked, not committed — had `LANGGRAPH_ENABLED=true` set locally, which is what actually registered the Coach router in this environment; the code's own default is `langgraph_enabled=False`, and CI/fresh clones without that local `.env` would never see these failures. Phase A1 fixed this by making `tests/unit/test_openapi_snapshot.py` construct `LangGraphSettings(langgraph_enabled=False)` explicitly, so the contract-surface snapshot is hermetic and independent of ambient local `.env` state — no snapshot allowlist change, and LangGraph remains disabled, per the Owner Migration Decisions' enablement timeline.
 
 ### 12.2 Frontend
 

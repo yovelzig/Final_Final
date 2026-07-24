@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: stock_research_system
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: stock_research_system/pyproject.toml
+
+      - name: Install backend package (dev + quality_evaluation extras)
+        run: pip install -e ".[dev,quality_evaluation]"
+
+      - name: Run backend unit tests
+        run: pytest tests/unit -q
+
+  frontend:
+    name: Frontend checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: stock_research_system/frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: stock_research_system/frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm run test
+
+  compose-validation:
+    name: Validate Compose files
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: stock_research_system
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate docker-compose.yml
+        env:
+          AUTH_JWT_SECRET: ci-placeholder-jwt-secret-not-for-runtime-use
+        run: docker compose -f docker-compose.yml config --quiet
+
+      - name: Validate docker-compose.production.yml
+        env:
+          POSTGRES_USER: ci_placeholder_user
+          POSTGRES_PASSWORD: ci-placeholder-password
+          POSTGRES_DB: ci_placeholder_db
+          AUTH_JWT_SECRET: ci-placeholder-jwt-secret-not-for-runtime-use
+          FINQUEST_WEB_ORIGIN: https://ci-placeholder.example.com
+          NEXT_PUBLIC_FINQUEST_API_BASE_URL: https://ci-placeholder-api.example.com
+        run: docker compose -f docker-compose.production.yml config --quiet
