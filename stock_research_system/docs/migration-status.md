@@ -1,0 +1,234 @@
+# FinQuest Migration Status
+
+**Current Production Commit:** not tracked in this file as a live pointer — this file tracks the *migration branch's* status, not production. The authoritative record of what's deployed lives in the operator-owned deployment log described in `production-deployment-runbook.md` §3 (EC2 flow, step 11), e.g. `/home/ubuntu/deployments/finquest-deployments.log` — never written by editing this file directly on the EC2 checkout. If this file's own historical record of deployments needs updating, that happens locally, via the normal commit → push → PR → merge flow, like any other change (Claude Code has no EC2 access and cannot read the commit actually deployed there).
+**Local baseline commit (this Stage 0 work):** `c1f9e2240594cb237a1d13abab042fcece7bf04f` on branch `migration/stage-00-baseline`.
+
+---
+
+## Owner Migration Decisions (Authoritative)
+
+Recorded directly from the product owner during Stage 0. These are **authoritative** and supersede any conflicting Stage 0 conclusion drawn purely from technical/dependency analysis — see `architecture-migration-plan.md`'s fuller "Owner Migration Decisions" section for the complete rationale. Summary:
+
+1. Existing PostgreSQL production data is **not business-critical** and may be reset during a planned migration — but see decision 6 (not yet).
+2. **Mandatory preservation boundary** (the only hard constraints): current AWS EC2, current Elastic IP and DNS, `researchstock.store`, `api.researchstock.store`, Caddy, HTTPS, public Web through Caddy to `localhost:3000`, public API through Caddy to `localhost:8080`, GitHub-based deployment. Everything else is in scope for change.
+3. Existing application code, API routes, database tables, tests, old n8n workflows, diagrams, exports, and documentation **may be removed or replaced** when not relevant to the target architecture — broader authority than Stage 0's original conservative "nothing is a confirmed deletion candidate" conclusion.
+4. Test or reference existence does **not** by itself make a feature a product requirement. Tests for intentionally removed features should be removed or replaced with the feature, not preserved as an orphaned constraint.
+5. **Preserve reusable infrastructure where useful**: authentication, FastAPI, Next.js, PostgreSQL, pgvector, TimescaleDB, Redis, Celery, Docker, Alembic, ports/adapters architecture, and generic secure integration contracts.
+6. **Do not reset the production database yet.** A reset is permitted only after new schema, migrations, bootstrap/seed, admin-account recreation, and smoke tests are all validated locally first.
+7. **Stage 1 is revised** into a Controlled Structural Reset — see the revised Stage 1 section below.
+
+**This pass is documentation-only.** No file was deleted, moved, or modified as application code as a result of recording these decisions. Deciding exactly *which* specific items are "confirmed obsolete" under decisions 3-4 is Stage 1's own first work item, not resolved here.
+
+---
+
+## Stage Plan
+
+| Stage | Name | Status |
+|---|---|---|
+| 0 | Baseline, inventory, dependency map, and safety documentation | **ACTIVE** |
+| 1 | Controlled Structural Reset (repository cleanup, CI foundation, product-relevance-based removal) | Not started |
+| 2 | Production Docker image and worker-health correction | Not started |
+| 3 | Markdown Knowledge Base foundation | Not started |
+| 4 | Ollama grounded Tutor | Not started |
+| 5 | Guardrails and Knowledge Sufficiency Gate | Not started |
+| 6 | Top-level LangGraph orchestration (enablement) | Not started |
+| 7 | Live Research domain | Not started |
+| 8 | n8n, Perplexity, SEC, and structured market data | Not started |
+| 9 | Learning Engine expansion | Not started |
+| 10 | Final production migration and hardening | Not started |
+
+## Active Stage
+
+**Stage 0 — Baseline, inventory, dependency map, and safety documentation.**
+
+## Known Production Limitations (carried forward from pre-Stage-0 notes, now verified against code)
+
+- ~~Static curriculum is not populated~~ — **superseded finding:** a real curriculum ("Investing Foundations": 1 path, 4 modules, 8 lessons, 24 exercises) *is* seeded via `scripts/seed_learning_curriculum.py`; it is modest in size, not absent. Whether it has actually been run against the production database is unverified from the repository alone (Claude Code has no EC2/production DB access) — treat "is the production DB seeded" as an open question for the deploying human, not a code gap.
+- Knowledge Base content today is derived exclusively from curriculum lessons/exercises, not from a curated Markdown corpus — confirmed accurate; Stage 3 addresses this.
+- Tutor generation defaults to a non-LLM extractive strategy (`DeterministicExtractiveTutor`), not "always abstains" literally — it always answers using retrieved evidence via keyword-overlap extraction, never fabricates, and falls back to an explicit insufficient-evidence message only when no relevant chunks are retrieved. A **generic** OpenAI-compatible adapter exists and is reusable against Ollama's endpoint (`REUSABLE_GENERIC_ADAPTER_EXISTS / OLLAMA_NOT_INTEGRATED` — see `architecture-migration-plan.md` §2.15) — Ollama itself is not integrated: no model is configured, no Ollama service is deployed, and no Ollama-specific test exists. Stage 4 addresses building the actual integration and, only then, making it the default in target environments.
+- LangGraph orchestrator is fully implemented (real `langgraph` `StateGraph`, real Postgres checkpointer, SSE, 22-node graph, human-in-the-loop resume) but gated off via `LANGGRAPH_ENABLED=false` — confirmed accurate; Stage 6 addresses enablement.
+- n8n is not deployed as a service anywhere (confirmed accurate) — the backend integration API n8n would call is real, tested, and unconditionally live regardless. Stage 8 addresses actual n8n deployment.
+- Ollama is not connected (confirmed accurate — no Ollama service exists in either Compose file; `OpenAICompatibleTutorAdapter`'s default `base_url` merely *points at* Ollama's usual port, nothing is listening there today).
+
+## Per-Stage Detail
+
+### Stage 0 — Baseline, inventory, dependency map, and safety documentation — **ACTIVE**
+
+- **Goal:** Establish ground truth about the current repository (not prior docs), classify every major capability, map dependencies, plan (but do not execute) Stage 1 cleanup.
+- **Allowed changes:** Create/update documentation only.
+- **Prohibited changes:** Any application code, migration, Docker/Compose, dependency, or environment-variable-behavior change; any deletion, move, or rename of application files; any commit or push.
+- **Expected migrations:** None.
+- **Expected affected services:** None.
+- **Local test requirements:** Run existing tests read-only to establish a baseline (done — see `current-architecture-inventory.md` §12); do not fix failures found.
+- **Production deployment impact:** None — no EC2 access was used or required.
+- **Rollback checkpoint:** N/A (documentation-only; the branch itself is the checkpoint).
+- **Definition of done:** All 6 documents listed in the Stage 0 task exist and are evidence-based (this document + 5 siblings). ✅ done as of this commit range.
+
+### Stage 1 — Controlled Structural Reset *(re-scoped per Owner Migration Decisions — see top of this document)*
+
+> **Revision history:** the original Stage 0 draft of this stage proposed creating empty/re-exporting packages ahead of need (removed in an earlier correction pass — that correction still holds, see below). A subsequent correction narrowed the stage to CI/test-fixture/Compose-validation only. **The product owner has now broadened it again**, via the Owner Migration Decisions above: Stage 1 is no longer a purely conservative, technical-safety-only cleanup — it now has explicit authority to remove application code, routes, tables, tests, n8n assets, and docs that are not relevant to the target architecture, determined by product relevance rather than technical entanglement alone. What has **not** changed: no empty package scaffolding, no reorganizing `ai_tutor/*` without an actual consuming capability, no production changes from Claude Code, and the mandatory preservation boundary (Owner Decision 2) stays untouched.
+
+- **Goal:** Combine the previously-scoped CI/test-fixture/Compose-validation work with a genuine product-relevance review: determine which existing n8n workflows/diagrams/tests, application modules/routes/tables, and documentation are actually still wanted for the target architecture, and remove the confirmed-obsolete ones — while preserving the reusable generic infrastructure named in Owner Decision 5 and never touching the mandatory preservation boundary (Owner Decision 2) or production itself.
+- **Allowed changes:**
+  - Everything from the prior narrower draft: add `.github/workflows/ci.yml` running `pytest tests/unit -q` (the exact command Stage 0 validated — 1165 passed, 2 pre-existing failures) plus frontend `npm run typecheck`/`lint`/`test`; deliberately fix `tests/unit/test_openapi_snapshot.py`'s two failing assertions (test-fixture update, not an API change); validate both Compose files via `config`; resolve `docker-compose.yml.backup` (delete after user confirmation, per `deprecation-removal-plan.md` §4).
+  - **New, per Owner Decisions 3-4:** a product-relevance review covering (a) the 6 n8n workflow files, diagrams, and their corresponding tests audited in Stage 0 (`deprecation-removal-plan.md` §3) — previously classified `KEEP`/`KEEP_AND_EXTEND` on technical grounds only (they're tested and wired); re-evaluate each against whether it's still wanted for the target Live Research architecture, not just whether it's technically live; (b) existing application modules, API routes, and database tables that Stage 0 classified as `IMPLEMENTED_AND_CONNECTED` but which may not serve the target architecture; (c) existing documentation, diagrams, and exports superseded by this Stage 0 documentation set or by the target architecture.
+  - Items confirmed obsolete by this review may be removed: application code, API routes, database tables (via a new, additive-only migration that drops them — see "Expected migrations" below), tests, n8n workflows/diagrams, and documentation. Tests that existed only to protect a feature being intentionally removed are removed or replaced alongside it (Owner Decision 4) — a test passing is not, by itself, a reason to keep the feature it tests.
+  - Reusable generic infrastructure named in Owner Decision 5 (auth, FastAPI, Next.js, Postgres, pgvector, TimescaleDB, Redis, Celery, Docker, Alembic, ports/adapters, the generic n8n-facing integration/auth contract) is preserved even while product-irrelevant application-level code built on top of it is removed.
+- **Prohibited changes:**
+  - Empty package scaffolding (`domain/knowledge/`, `application/tutor/`, etc. are still not created ahead of an actual capability needing them).
+  - Any change to the mandatory preservation boundary (Owner Decision 2: current EC2 instance, Elastic IP/DNS, `researchstock.store`/`api.researchstock.store`, Caddy, HTTPS, Web→`localhost:3000`, API→`localhost:8080`, GitHub-based deployment).
+  - Any production database reset (Owner Decision 6 — gated on new schema/migrations/bootstrap/admin-recreation/smoke tests being validated locally first; none of that exists yet, so a reset is not authorized in this stage).
+  - Any production modification from Claude Code, ever (standing execution boundary).
+  - Any edit to a released migration; any rename of `stock_research_core`; any change to Docker Compose service names.
+- **Expected migrations:** Possibly yes — a change from the prior draft. If the product-relevance review confirms specific database tables are obsolete, Stage 1 may include a new, additive-in-the-chain migration that drops them. Any such migration must be written and verified (upgrade/downgrade/upgrade) against a **local, disposable** database first — treat a data-removing migration with the same "validate locally before applying to production" discipline as Owner Decision 6 requires for a full reset, even though a partial table drop is a smaller action than a full reset.
+- **Expected affected services:** Depends on what the product-relevance review finds. At minimum, none at runtime (the CI/test-fixture/Compose-validation portion). If application modules/routes are removed, `finquest-api` and/or affected workers would need a rebuild — but Stage 1 itself does not deploy that rebuild to production; a human operator decides if/when to deploy Stage 1's result, following the runbook, same as any other stage.
+- **Local test requirements:** `pytest tests/unit -q` clean (zero failures, including the deliberate OpenAPI-snapshot fix); the full test suite re-run after any module/test removal to confirm nothing still-wanted broke; frontend `lint`/`typecheck`/`test` clean.
+- **Production deployment impact:** None directly from Claude Code (standing boundary). Whatever this stage produces is deployed later, manually, per the runbook — and only after local validation per Owner Decision 6 if it touches schema or data.
+- **Rollback checkpoint:** Given the broadened scope, Stage 1 should land as a small number of separately reviewable PRs (e.g., CI/test-fixture first, product-relevance-review removals second) rather than one large PR — rollback of each is a Git revert per the runbook's rollback procedure.
+- **Definition of done:** CI is green; `test_openapi_snapshot.py` has zero failures; both Compose files validate cleanly; `docker-compose.yml.backup` is resolved; a completed product-relevance review exists with an explicit, traceable list of what was removed and why (tied to Owner Decisions 3-4); no empty scaffolding was created; the mandatory preservation boundary and the reusable generic infrastructure (Owner Decisions 2 and 5) are both untouched; nothing was applied to production.
+
+### Stage 2 — Production Docker image and worker-health correction *(contract expanded per correction pass)*
+
+- **Goal:** Correct production Docker image targets to match the `Dockerfile`'s own documented intent (only `finquest-api` and `finquest-worker-knowledge` need the heavier `ai` image; the other 3 workers don't need embedding dependencies), fix the worker-health-check contract so only the knowledge worker's healthcheck requires embedding-provider readiness, ensure the image actually contains the operational scripts it needs, and close the production-safety gap in the knowledge-base seed script.
+- **Verified current state (Stage 0 correction-pass findings, grounding this stage's scope):** in `docker-compose.production.yml` today, **all 5** backend services (`finquest-api` + all 4 `finquest-worker-*`) are built with `target: ai`, uniformly — heavier than the `Dockerfile`'s own stage comment intends ("`base`... stays a small, network-free image for API/market/portfolio/evaluation workers. Only the knowledge worker... needs this stage"). Locally, `docker-compose.yml` correctly uses `target: base` for api/market/portfolio/default and `${KNOWLEDGE_WORKER_TARGET:-base}` for knowledge (defaulting to `base` even for knowledge unless overridden). The `Dockerfile` does not currently `COPY scripts ./scripts` into either stage. `cli/worker_status.py` has no CLI-flag support at all today (no `argparse`, no `--require-embedding`). `scripts/seed_finquest_knowledge_base.py` has a `--real-embeddings` flag but **no** guard analogous to `assert_embedding_provider_production_safe()` preventing a fake-embedding run against `FINQUEST_ENV=production`.
+- **Allowed changes:**
+  - `Dockerfile`: add `COPY scripts ./scripts` to the `base` stage, so seed/operational scripts are actually runnable inside a deployed container.
+  - `docker-compose.production.yml`: change `target: ai` → `target: base` for `finquest-worker-market`, `finquest-worker-portfolio`, `finquest-worker-default`; keep `finquest-api` and `finquest-worker-knowledge` at `target: ai`.
+  - `cli/worker_status.py`: add a `--require-embedding` flag so only the knowledge worker's Docker `HEALTHCHECK` invokes it with that flag — market/portfolio/default workers' healthchecks should not depend on embedding-provider initializability in a `base` image that was never meant to have those dependencies.
+  - `scripts/seed_finquest_knowledge_base.py`: add a production-safety guard preventing a fake-embedding (i.e. non-`--real-embeddings`) run when `FINQUEST_ENV=production`, mirroring `assert_embedding_provider_production_safe()`'s existing pattern for the API.
+  - Define or add the repeatable backup helper/runbook command described in `production-deployment-runbook.md` §5 — must exist and be exercised at least once **before Stage 3's ingestion** runs against production. (This is the only backup-automation work required by this stage — a full automated retention/off-server pipeline remains Stage 10's scope, not this stage's.)
+- **Prohibited changes:** Application business logic; database schema; API surface.
+- **Expected migrations:** None.
+- **Expected affected services:** `finquest-api`, all 4 `finquest-worker-*` services (rebuild only, per the runbook's "only affected services" rule).
+- **Local test requirements:** `docker compose build` succeeds locally for every affected service at its corrected target; new tests confirming (a) `worker_status.py --require-embedding` fails cleanly on a `base`-target container and passes on an `ai`-target one, (b) the KB seed script refuses fake embeddings when `FINQUEST_ENV=production`.
+- **Production deployment impact:** Requires a real deploy — rebuild + recreate affected services only, per the runbook. Moving 3 services from `ai` to `base` should reduce image size/resource use, not regress functionality — confirm with a smoke test that market/portfolio/default workers still process jobs correctly afterward.
+- **Rollback checkpoint:** Previous image tags/commit; rollback via the runbook's Git-consistent rollback procedure (§4) — a reverted commit and redeploy, not a direct old-commit checkout.
+- **Definition of done:** All worker healthchecks pass consistently, with only the knowledge worker's healthcheck requiring embedding-provider readiness; `finquest-api` and `finquest-worker-knowledge` run the `ai` image, the other 3 workers run `base`; `scripts/` is present and runnable inside the deployed image; the KB seed script refuses fake embeddings in production without an explicit override; a documented backup command/helper exists and has been exercised at least once.
+
+### Stage 3 — Markdown Knowledge Base foundation *(paths and approval contract corrected per correction pass)*
+
+- **Goal:** Author and ingest a curated Markdown Knowledge Base corpus with front matter, a manifest, SHA-256 validation, and document versioning, using the ingestion pipeline that already exists.
+- **Allowed changes:** New content under `knowledge/seed_documents/en/` with an accompanying `knowledge/seed_documents/manifest.json` — **not** `docs/knowledge/`; `docs/` is reserved for project/migration documentation, not tutor content, and this correction fixes an earlier inconsistent path; a manifest schema + validation script; an `approve_document` transition (service method + admin endpoint) to close the approval-workflow gap identified in `architecture-migration-plan.md` §2.17; optionally an S3-compatible storage adapter behind a new port.
+- **Prohibited changes:** Changing the existing hybrid-retrieval or embedding logic; changing how curriculum-derived knowledge is ingested (additive only).
+- **Expected migrations:** Possibly one, only if the approval-workflow transition needs a new column/state (current fields likely suffice — verify before deciding a migration is needed).
+- **Expected affected services:** `finquest-worker-knowledge` (re-ingestion), `finquest-api` (new admin endpoint).
+- **Local test requirements:** New tests for the manifest validator, the approval transition, idempotent re-ingestion (running ingestion twice against an unchanged corpus produces no duplicate/re-archived rows), and retrieval scoped to the approved subset of the corpus.
+- **Production deployment impact:** Requires running an ingestion job against production data — must be preceded by a backup using the Stage 2 backup helper, and must run with a real (non-fake) embedding provider, enforced by the Stage 2 production-safety guard on the seed script.
+- **Rollback checkpoint:** Pre-ingestion DB backup; ingestion is additive (new document rows), so rollback is "delete/archive the newly ingested documents," not a schema rollback.
+- **Definition of done (approval is a deliberate editorial decision, not automatic):**
+  - Exactly 15 substantive Markdown documents exist under `knowledge/seed_documents/en/`.
+  - Every document has valid front matter matching the defined schema.
+  - `knowledge/seed_documents/manifest.json` is valid and every listed SHA-256 hash matches its document's actual content.
+  - The validation script passes against the full corpus.
+  - Only documents whose factual claims have been source-verified by a human reviewer are transitioned to `APPROVED`; every other document remains `DRAFT` in a state recorded as `draft_requires_source_review` — approval is never a side effect of ingestion.
+  - No unapproved document is ever returned by learner-facing retrieval (already enforced today by `hybrid_search`'s `approval_status == APPROVED` filter — this stage must not weaken that filter).
+  - Ingestion is idempotent: re-running it against an unchanged corpus produces no duplicate or re-archived documents.
+  - New retrieval tests cover the approved subset of the corpus specifically (not just curriculum-derived content).
+
+### Stage 4 — Ollama grounded Tutor
+
+- **Goal:** Make `OpenAICompatibleTutorAdapter` (pointed at a real Ollama instance) the default tutor provider in target environments, with structured responses, citations, and defined failure behavior — while keeping SentenceTransformer embeddings as-is (per the user's own instruction).
+- **Allowed changes:** New Ollama service in Compose (opt-in, not replacing the extractive default in every environment simultaneously); a new integration test exercising the adapter against a real or containerized Ollama; documented resource sizing.
+- **Prohibited changes:** Changing the embedding provider; changing the citation-verification/guardrail logic (reuse it — it already validates cited chunk IDs against retrieval evidence, model-agnostically).
+- **Expected migrations:** None expected.
+- **Expected affected services:** New `ollama` Compose service; `finquest-api` (env var change to switch provider, no code change needed — the adapter already exists).
+- **Local test requirements:** New `tests/integration/test_openai_compatible_tutor_ollama.py`-style test (does not exist today — a confirmed gap); full guardrail/evaluation suite (`finquest-safety-v1`, `finquest-rag-core-v1`) re-run against real Ollama output.
+- **Production deployment impact:** Resource sizing risk (see `architecture-migration-plan.md` risk table) — must be load-tested on a non-production host first.
+- **Rollback checkpoint:** The flag flip (`TUTOR_MODEL_PROVIDER`) is instantly reversible — rollback is an env var change plus service restart, not a code rollback.
+- **Definition of done:** Ollama answers pass the full guardrail + evaluation suite at parity with (or better than) the extractive tutor's safety profile.
+
+### Stage 5 — Guardrails and Knowledge Sufficiency Gate
+
+- **Goal:** Build a named, scored Knowledge Sufficiency Gate (replacing today's implicit "any citations vs. none" check) and, optionally, a distinct retrieval-stage guardrail component (today folded into the retriever).
+- **Allowed changes:** New `KnowledgeSufficiencyGate` port/class in `application/ai_tutor/` (or its Stage-1 successor location); threshold configuration; current-information classification as a precursor to Stage 7 routing.
+- **Prohibited changes:** Existing input/output guardrail logic (extend, don't replace) — it is tested and production-safe today.
+- **Expected migrations:** Possibly one, if sufficiency decisions need to be persisted/audited (recommended, for the same reasons `tutor_guardrail_decisions` exists).
+- **Expected affected services:** `finquest-api`.
+- **Local test requirements:** New unit tests for the gate's threshold logic; full `test_tutor_guardrails.py` must still pass unmodified (regression check).
+- **Production deployment impact:** Low — additive gate, existing fallback path unchanged.
+- **Rollback checkpoint:** Feature-flag the gate the same way every other Stage 4-6 feature is flagged, so rollback is a config change.
+- **Definition of done:** Gate correctly abstains on genuinely insufficient evidence and correctly answers on sufficient evidence, verified against the existing evaluation suites plus new threshold-boundary cases.
+
+### Stage 6 — Top-level LangGraph orchestration (enablement)
+
+- **Goal:** Enable `LANGGRAPH_ENABLED=true` in a real (first staging, then production) environment; fix the pre-existing `test_openapi_snapshot.py` drift deliberately as part of this stage (since this is the stage that intentionally finalizes the `/api/v1/coach` surface).
+- **Allowed changes:** Flag flip; OpenAPI snapshot update; any final polish to the 22-node graph found necessary under real (non-fake) load; frontend capability-detection so the Coach UI degrades gracefully if the flag is ever off in one environment but not another (see `migration-dependency-map.md` §5 risk).
+- **Prohibited changes:** The underlying tutor/scenario/portfolio/adaptive services the graph calls (reuse them; this stage is about turning the orchestrator on, not rewriting its dependents).
+- **Expected migrations:** None expected (0010 already created the audit tables; LangGraph's own checkpoint tables are created via the `learning_orchestrator_admin --setup-checkpointer` CLI step, which must be run once against the target DB before enabling).
+- **Expected affected services:** `finquest-api` (checkpointer pool opens at startup once enabled — capacity implication per risk table).
+- **Local test requirements:** Full `tests/integration/test_orchestrator_*` and `test_langgraph_postgres_checkpointer.py` against local Postgres; canary-style enablement in staging before production.
+- **Production deployment impact:** Medium — first-ever production enablement of this code path; must follow a canary plan, not a direct flip (per risk table).
+- **Rollback checkpoint:** Flag flip back to `false`; checkpoint tables can remain (harmless if unused) — no destructive rollback needed.
+- **Definition of done:** Coach is live in production, OpenAPI snapshot test passes again (deliberately updated), no capacity regression observed on `/metrics`.
+
+### Stage 7 — Live Research domain
+
+- **Goal:** Build research jobs, evidence normalization, source trust/scoring, callbacks, and synthesis contracts as a new domain, reusing the existing `BackgroundJobService`/Celery job pattern and the LangGraph subgraph pattern.
+- **Allowed changes:** New `domain/live_research/`, `application/live_research/`, `infrastructure/live_research/` packages (per target repository structure); new `BackgroundJobType` entries; a new LangGraph subgraph analogous to existing ones.
+- **Prohibited changes:** Existing job types/queues (additive only).
+- **Expected migrations:** Yes — new tables for research jobs/evidence/sources.
+- **Expected affected services:** `finquest-api`, likely a new or repurposed worker queue.
+- **Local test requirements:** Full new test suite mirroring the existing per-capability pattern (unit + integration, architecture tests).
+- **Production deployment impact:** Medium — new schema, new job type, no existing behavior touched.
+- **Rollback checkpoint:** New migration is additive; rollback via `alembic downgrade` to pre-Stage-7 revision if needed before any data depends on the new tables.
+- **Definition of done:** A research job can be submitted, evidence normalized and scored, and a synthesized answer produced with verifiable citations — end-to-end, in a non-production environment first.
+
+### Stage 8 — n8n, Perplexity, SEC, and structured market data
+
+- **Goal:** Actually deploy n8n (or confirm the decision not to self-host it and use the existing generic integration API from an externally-managed n8n instead); add Perplexity, SEC/filings, and additional market-data provider adapters.
+- **Allowed changes:** Extend (not replace) the 5 job-trigger n8n workflows for new Live Research job types; new provider adapters behind the existing `MarketDataProviderPort`-style pattern; new Perplexity adapter behind a new port.
+- **Prohibited changes:** The existing yfinance adapter and its tests (additive new providers only); the existing integration-auth/idempotency contract (extend its allowed-job-types, don't redesign it).
+- **Expected migrations:** Possibly none (integration schema already supports arbitrary `BackgroundJobType`s) — verify before assuming.
+- **Expected affected services:** Possibly a new `n8n` Compose service, if self-hosting is chosen.
+- **Local test requirements:** `test_n8n_workflow_contracts.py` extended for new workflow files; new provider-adapter tests.
+- **Production deployment impact:** Medium-high if n8n is newly self-hosted (new service, new attack surface — needs its own security review); low if using an externally-managed n8n instance.
+- **Rollback checkpoint:** New workflows are independently importable/removable in n8n itself; backend changes are additive.
+- **Definition of done:** At least one real external research signal (Perplexity or SEC) flows end-to-end through a job trigger to a synthesized, cited answer.
+
+### Stage 9 — Learning Engine expansion
+
+- **Goal:** Course/Track/Unit/Concept mapping (reusing `LearningPath`/`LearningModule`/`Lesson`/`Skill` where they already satisfy the target vocabulary), misconception detection, gamification, spaced-repetition refinement, English/Hebrew bilingual support.
+- **Allowed changes:** New `Concept`/`Unit` tiers if genuinely needed (per gap matrix — evaluate before adding, since `Module`/`Skill` may already suffice); a real misconception-detection service; real XP/streak/achievement computation; i18n infrastructure (backend localized-content model + frontend `dir`/locale support).
+- **Prohibited changes:** Renaming `LearningPath`→`Course` etc. without a proven need (per user's explicit instruction) — prefer additive concepts or documented vocabulary mapping.
+- **Expected migrations:** Yes — new tables for achievements, misconception-detection outputs (if the schema needs new fields beyond what exists), localized content.
+- **Expected affected services:** `finquest-api`, `finquest-web` (major frontend work for RTL/i18n).
+- **Local test requirements:** Full test suite for each new sub-feature; frontend a11y suite re-run with RTL routes added.
+- **Production deployment impact:** Medium — mostly additive, but RTL/i18n touches shared layout code broadly.
+- **Rollback checkpoint:** Per-feature flags recommended (matching the existing pattern) so each of gamification/misconceptions/i18n can roll back independently.
+- **Definition of done:** All four sub-features (concept mapping decision, misconceptions, gamification, bilingual) are live and independently toggleable.
+
+### Stage 10 — Final production migration and hardening
+
+- **Goal:** Backups, restore-test verification, security review, monitoring, performance validation, release verification across the whole migrated system.
+- **Allowed changes:** Operational/config hardening; no new features.
+- **Prohibited changes:** New feature work (belongs in earlier stages).
+- **Expected migrations:** None new, but every prior stage's migrations must be verified restorable from backup.
+- **Expected affected services:** All.
+- **Local test requirements:** Full test suite, full evaluation suite, a documented restore-from-backup drill performed at least once against a non-production copy.
+- **Production deployment impact:** High-visibility but should be low-risk if every prior stage's rollback checkpoints were honored.
+- **Rollback checkpoint:** Full backup taken immediately before this stage's final production changes.
+- **Definition of done:** A completed restore drill, a passing security review, monitoring dashboards covering every new subsystem, and sign-off that the target architecture (Learning + Knowledge/Tutor + Live Research engines, bilingual, S3 storage, observability, security, testing) is met.
+
+---
+
+## Stage 1 Entry Criteria (recommended scope — not implemented in Stage 0)
+
+*Revised twice: first to drop package creation/re-export scaffolding and the cosmetic test-file move (an earlier correction pass), then broadened again per the Owner Migration Decisions above into a Controlled Structural Reset. Items below are split into "known now" (concrete, from the CI/test-fixture/Compose-validation portion) and "determined by the product-relevance review" (Stage 1's own first work item under the new scope — Stage 0 does not have the product-relevance information to name these specifically).*
+
+**Known now:**
+- **Exact files proposed for deletion:** `docker-compose.yml.backup` — pending explicit user confirmation that its one-line `HOSTNAME` divergence from the current `docker-compose.yml` reflects an intentional, already-adopted change (see `deprecation-removal-plan.md` §4).
+- **Exact files proposed for movement:** None identified yet outside the review below.
+- **Exact modules proposed for creation:** None under `src/`. Only `.github/workflows/ci.yml` (new file, CI configuration, not an application package) — still holds; empty package scaffolding remains out of scope per Owner Decision 7.
+- **Exact compatibility measures:** None needed for the known-now portion — no package move is happening.
+- **Exact tests required before any change:** `pytest tests/unit -q` — the exact command Stage 0 executed (1165 passed, 2 pre-existing `test_openapi_snapshot.py` failures); not the same invocation as `pytest -m "not integration"` (see `current-architecture-inventory.md` §12.1). The full `pytest -m integration` suite was **not run to completion in Stage 0** (§12.3) — Stage 1's CI should budget a dedicated, multi-hour run before relying on it as a gate. Full frontend `lint`/`typecheck`/`test` (34/34 files, 154/154 tests, all passing, 74.95s).
+- **Exact tests required after the OpenAPI-snapshot fix:** `pytest tests/unit -q` with **zero** failures.
+- **Whether any migration is required (known-now portion):** No.
+- **Which Docker services would be affected (known-now portion):** None at runtime.
+- **Rollback approach (known-now portion):** A Git revert of the relevant PR per the runbook's rollback procedure (§4). No data migration involved.
+
+**Determined by the product-relevance review (to be produced as Stage 1's first deliverable, not assumed here):**
+- **Exact files/modules/n8n-workflows/docs proposed for removal:** Not enumerated in Stage 0 — this requires the product owner's judgment (via whoever runs Stage 1) about which of the `IMPLEMENTED_AND_CONNECTED`/`KEEP`/`KEEP_AND_EXTEND` items in `deprecation-removal-plan.md` and `architecture-migration-plan.md` §2 are still wanted for the target architecture. Stage 0 explicitly does not have the authority or information to name these; naming them without that judgment would just be re-introducing the "technical entanglement ≠ product relevance" mistake Owner Decision 4 calls out.
+- **Exact tests proposed for removal:** Whichever tests exist solely to protect a feature the review confirms as obsolete — determined together with the feature list above, not separately.
+- **Whether any migration is required:** Possibly — only if the review confirms specific database tables are obsolete. Any such migration is additive-only in the chain (drops tables, doesn't renumber or edit existing migrations) and must be validated locally (upgrade/downgrade/upgrade against a disposable database) before any production application is even considered.
+- **Which Docker services would be affected:** Only ones whose code the review actually removes — cannot be named until the review completes.
+- **Rollback approach:** Same Git-revert discipline as above, plus — if a migration is involved — the runbook's migration-aware rollback branching (§4): confirm whether the migration ran before deciding between a downgrade and a backup restore.
