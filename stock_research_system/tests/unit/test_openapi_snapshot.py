@@ -10,6 +10,7 @@ rather than silently drifting.
 from __future__ import annotations
 
 from stock_research_core.api.app_factory import create_app
+from stock_research_core.infrastructure.learning_orchestrator.config import LangGraphSettings
 
 _EXPECTED_TAGS = {
     "Authentication", "Learners", "Curriculum", "Adaptive Learning", "Historical Scenarios",
@@ -72,7 +73,15 @@ _EXPECTED_PATHS = {
 
 
 def _openapi_spec() -> dict:
-    app = create_app(testing=True)
+    # Force LangGraph off for this contract-surface snapshot regardless of an
+    # ambient LANGGRAPH_ENABLED=true in a developer's local, gitignored .env -
+    # enabling LangGraph is a later-phase decision, never an accidental side
+    # effect of this test's environment. Constructor kwargs outrank env/.env
+    # in pydantic-settings' default source precedence, so this is deterministic.
+    app = create_app(
+        testing=True,
+        learning_orchestrator_settings=LangGraphSettings(langgraph_enabled=False),
+    )
     return app.openapi()
 
 

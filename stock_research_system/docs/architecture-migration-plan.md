@@ -34,6 +34,12 @@ The following decisions were given directly by the product owner during Stage 0 
 
 ---
 
+## Phase Sequencing Cross-Reference
+
+This document's capability map and gap matrix (§2–§3) remain the authoritative *architecture* analysis. For current *phase sequencing* (A1/A2/B/C1/C2.1–C2.3/F1/C3/D/E/G1/G2/H/I/J), see `migration-status.md`'s "Master-Spec Phase Plan" section — the Stage 0–10 numbering previously cross-referenced from this document is superseded and preserved only as history in that file.
+
+---
+
 ## 1. Method
 
 Every capability below was classified by reading the domain/application/infrastructure/API code that implements it, checking whether it is registered in `src/stock_research_core/api/app_factory.py` (the single composition root for the API) or `infrastructure/operations/celery_tasks.py` (the Celery composition root), and cross-referencing existing tests. Classifications used:

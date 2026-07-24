@@ -2,6 +2,66 @@
 
 **Current Production Commit:** not tracked in this file as a live pointer — this file tracks the *migration branch's* status, not production. The authoritative record of what's deployed lives in the operator-owned deployment log described in `production-deployment-runbook.md` §3 (EC2 flow, step 11), e.g. `/home/ubuntu/deployments/finquest-deployments.log` — never written by editing this file directly on the EC2 checkout. If this file's own historical record of deployments needs updating, that happens locally, via the normal commit → push → PR → merge flow, like any other change (Claude Code has no EC2 access and cannot read the commit actually deployed there).
 **Local baseline commit (this Stage 0 work):** `c1f9e2240594cb237a1d13abab042fcece7bf04f` on branch `migration/stage-00-baseline`.
+**Phase A1 baseline commit:** `5f1d2d36a51296f0a501559c1951185b006026cb` on branch `migration/phase-a1-baseline-stabilization`.
+
+---
+
+## Master-Spec Phase Plan (Authoritative — supersedes Stage numbering below)
+
+> Effective 2026-07-24. This section is the current source of truth for phase sequencing. The Owner Migration Decisions immediately below remain fully authoritative and are shared by both this Phase Plan and the historical Stage-based plan further down this document. The Stage 0–10 plan later in this document is **preserved, not deleted** — see the "Historical: Stage-based plan (superseded)" callout right before it.
+
+### Phase Plan
+
+| Phase | Name | Status |
+|---|---|---|
+| A1 | Baseline stabilization and master-spec alignment | **ACTIVE** |
+| A2 | Production image and worker-health correction | Not started |
+| B | Curriculum and first usable learner flow | Not started |
+| C1 | Knowledge document framework | Not started |
+| C2.1 | Seed knowledge documents 01–05 | Not started |
+| C2.2 | Seed knowledge documents 06–10 | Not started |
+| C2.3 | Seed knowledge documents 11–15 | Not started |
+| F1 | S3 infrastructure and adapter | Not started |
+| C3 | Knowledge ingestion and retrieval | Not started |
+| D | Ollama Cloud Tutor | Not started |
+| E | Guardrails and Knowledge Sufficiency Gate | Not started |
+| G1 | Live Research domain | Not started |
+| G2 | n8n Cloud, Perplexity, SEC, and company IR/market data | Not started |
+| H | OpenAI evidence synthesis | Not started |
+| I | LangGraph production orchestration (enablement) | Not started |
+| J | Product completion, database cutover, and operations | Not started |
+
+### Explicit platform/provider clarifications (binding on every later phase)
+
+- **Ollama Cloud**, not a locally-hosted Ollama instance or a second Ollama EC2 instance.
+- **n8n Cloud** (`https://yovel.app.n8n.cloud/`), not self-hosted n8n — no n8n Docker service, DNS, or Caddy routing.
+- **S3** (or an S3-compatible bucket), not MinIO — production S3 access will later use an EC2 IAM role/Instance Profile, not long-lived access keys in production `.env`.
+- **English frontend and curriculum in the first release**; Tutor input/output must later support English and Hebrew, with correct RTL rendering for Hebrew.
+- **Ollama Cloud** is the educational grounded Tutor provider; **OpenAI** is a separate, optional provider for normalized live-research evidence synthesis, architecturally distinct from the Tutor.
+- **Perplexity** is a discovery/research provider, not the source of truth for official numerical financial data.
+- **Existing SentenceTransformer embeddings remain unchanged** through at least Phase A1/A2 — no embedding-model change in this phase.
+- Phase A1 deletes and rewrites **no** n8n workflow artifact — existing artifacts are replaced only once the future `finquest_live_research` workflow exists and passes contract tests (Phase G2).
+- Phase A1 performs **no** production database reset (Owner Decision 6 below still gates this).
+
+### Active Phase
+
+**Phase A1 — Baseline Stabilization and Master-Spec Alignment.**
+
+### Phase A1 — Detail
+
+- **Goal:** Establish a clean, trustworthy baseline — aligned with this new Master Spec — before any production image, curriculum, knowledge-base, provider, research, or schema work begins.
+- **Allowed changes:** Fix `tests/unit/test_openapi_snapshot.py`'s two failing assertions (test hermeticity, not a contract change); add `.github/workflows/ci.yml`; delete the confirmed-obsolete `docker-compose.yml.backup`; validate both Compose files; update this documentation set to record the new phase sequence, with the historical Stage 0–10 plan preserved.
+- **Prohibited changes:** Any domain/application/infrastructure code change beyond the one test-file fix; any API route, schema, or Dockerfile change; any production Compose *behavior* change; any `.env`/`.env.production.example` change; any migration; any n8n artifact deletion/rewrite; any Ollama/OpenAI/Perplexity/S3/LangGraph activation; any database reset; any commit, push, or production deployment performed by Claude Code.
+- **Expected migrations:** None.
+- **Expected affected services:** None at runtime — CI/test-fixture/documentation only.
+- **Local test requirements:** `pytest tests/unit -q` clean; frontend `typecheck`/`lint`/`test` clean; both Compose files validate via `config --quiet`.
+- **Production deployment impact:** None — no EC2 access used or required; the user reviews, commits, pushes, merges, and deploys manually.
+- **Rollback checkpoint:** A Git revert of this phase's PR — nothing is committed by Claude Code in this phase.
+- **Definition of done:** `test_openapi_snapshot.py` has zero failures; `.github/workflows/ci.yml` exists and is scoped as described; `docker-compose.yml.backup` is removed; both Compose files validate; this document records the new Phase Plan while preserving Stage 0–10 as history.
+
+### Phase A1 correction note — OpenAPI snapshot root cause
+
+The two `test_openapi_snapshot.py` failures recorded during Stage 0 (see `current-architecture-inventory.md` §12.1 and the corresponding row in `migration-dependency-map.md`) were re-investigated in Phase A1 and found to have a narrower cause than originally recorded: a local, gitignored `stock_research_system/.env` had `LANGGRAPH_ENABLED=true` set, which registered the Coach router in that specific environment only — the code's own default is `langgraph_enabled=False`, and a CI runner or fresh clone without that local `.env` would never reproduce the failures. Phase A1 fixed this by making the test construct `LangGraphSettings(langgraph_enabled=False)` explicitly (hermetic, deterministic), without touching the snapshot's path/tag allowlist and without enabling LangGraph — that remains Phase I's scope. See `current-architecture-inventory.md`'s Phase A1 addendum for the full technical detail.
 
 ---
 
@@ -20,6 +80,10 @@ Recorded directly from the product owner during Stage 0. These are **authoritati
 **This pass is documentation-only.** No file was deleted, moved, or modified as application code as a result of recording these decisions. Deciding exactly *which* specific items are "confirmed obsolete" under decisions 3-4 is Stage 1's own first work item, not resolved here.
 
 ---
+
+## Historical: Stage-based plan (superseded)
+
+> Everything from this heading through "## Stage 1 Entry Criteria" below is Stage 0's own Stage 0–10 plan, preserved verbatim as a historical record. It is **superseded by the Master-Spec Phase Plan above as of Phase A1** and should not be extended going forward — use the Phase Plan above for current sequencing. Nothing in this section has been edited or moved as part of Phase A1.
 
 ## Stage Plan
 
