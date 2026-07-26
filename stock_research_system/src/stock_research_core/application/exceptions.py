@@ -383,3 +383,19 @@ class QualityEvaluationBaselineNotFoundError(StockResearchError):
 class QualityEvaluationBaselineNotComparableError(StockResearchError):
     """A baseline comparison was requested between two runs that are not
     directly comparable (different suite versions, missing metrics)."""
+
+
+class ObjectStorageError(StockResearchError):
+    """Base exception for shared object-storage operations."""
+
+
+class ObjectNotFoundError(ObjectStorageError):
+    """No object exists at the requested key (and version, if given)."""
+
+
+class ObjectStorageAccessDeniedError(ObjectStorageError):
+    """The object-storage backend denied the requested operation."""
+
+
+class ObjectStoragePrefixNotAllowedError(ObjectStorageError):
+    """The requested key does not fall inside any configured allowed prefix."""
