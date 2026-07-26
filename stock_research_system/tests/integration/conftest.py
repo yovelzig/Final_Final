@@ -43,6 +43,11 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 # Children before parents, so a plain (non-cascading) cleanup would also work.
 _TABLES_IN_DEPENDENCY_ORDER = [
+    "claim_evidence_links",
+    "research_claims",
+    "evidence_items",
+    "research_runs",
+    "research_requests",
     "learning_quality_aggregates",
     "quality_evaluation_baselines",
     "quality_metric_results",

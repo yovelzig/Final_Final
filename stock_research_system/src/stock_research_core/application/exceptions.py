@@ -415,3 +415,49 @@ class SeedDocumentIntegrityError(StockResearchError):
     """A seed document's canonical bytes did not match the hash the caller
     expected - the manifest's `content_hash`, or the hash of what was
     just uploaded/downloaded to/from object storage."""
+
+
+class ResearchRequestNotFoundError(StockResearchError):
+    """No matching Live Research request was found."""
+
+
+class ResearchRequestConflictError(StockResearchError):
+    """The same requester + idempotency key was reused with a different
+    request identity (normalized query, scope, or subject) than the one
+    that produced the existing `ResearchRequest`."""
+
+
+class ResearchRunNotFoundError(StockResearchError):
+    """No matching Live Research run was found."""
+
+
+class InvalidResearchRunStateError(StockResearchError):
+    """The requested operation is not a legal transition for this
+    `ResearchRun`'s current status."""
+
+
+class EvidenceItemNotFoundError(StockResearchError):
+    """No matching Live Research evidence item was found."""
+
+
+class DuplicateEvidenceError(StockResearchError):
+    """This run already has an evidence item with the same content_hash."""
+
+
+class ResearchClaimNotFoundError(StockResearchError):
+    """No matching Live Research claim was found."""
+
+
+class ClaimEvidenceLinkNotFoundError(StockResearchError):
+    """No matching claim-evidence link was found."""
+
+
+class DuplicateClaimEvidenceLinkError(StockResearchError):
+    """This claim/evidence pair is already linked with a stance."""
+
+
+class InvalidClaimStatusTransitionError(StockResearchError):
+    """The requested `ResearchClaim` status is not supported by the
+    claim's current `ClaimEvidenceLink` rows (e.g. CORROBORATED requires a
+    SUPPORTS link; UNRESOLVED_CONFLICT requires both a SUPPORTS and a
+    CONTRADICTS link)."""

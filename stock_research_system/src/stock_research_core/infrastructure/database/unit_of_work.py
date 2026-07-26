@@ -53,6 +53,21 @@ from stock_research_core.infrastructure.database.repositories.integration_client
 from stock_research_core.infrastructure.database.repositories.integration_request_repository import (
     SqlAlchemyIntegrationRequestRepository,
 )
+from stock_research_core.infrastructure.database.repositories.research_request_repository import (
+    SqlAlchemyResearchRequestRepository,
+)
+from stock_research_core.infrastructure.database.repositories.research_run_repository import (
+    SqlAlchemyResearchRunRepository,
+)
+from stock_research_core.infrastructure.database.repositories.evidence_item_repository import (
+    SqlAlchemyEvidenceItemRepository,
+)
+from stock_research_core.infrastructure.database.repositories.research_claim_repository import (
+    SqlAlchemyResearchClaimRepository,
+)
+from stock_research_core.infrastructure.database.repositories.claim_evidence_link_repository import (
+    SqlAlchemyClaimEvidenceLinkRepository,
+)
 from stock_research_core.infrastructure.database.repositories.learning_orchestrator_action_repository import (
     SqlAlchemyLearningOrchestratorActionRepository,
 )
@@ -230,6 +245,11 @@ class SqlAlchemyUnitOfWork:
         self.quality_evaluation_results = SqlAlchemyQualityEvaluationResultRepository(session)
         self.quality_evaluation_baselines = SqlAlchemyQualityEvaluationBaselineRepository(session)
         self.learning_quality = SqlAlchemyLearningQualityRepository(session)
+        self.research_requests = SqlAlchemyResearchRequestRepository(session)
+        self.research_runs = SqlAlchemyResearchRunRepository(session)
+        self.evidence_items = SqlAlchemyEvidenceItemRepository(session)
+        self.research_claims = SqlAlchemyResearchClaimRepository(session)
+        self.claim_evidence_links = SqlAlchemyClaimEvidenceLinkRepository(session)
         return self
 
     async def __aexit__(

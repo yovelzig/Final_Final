@@ -46,6 +46,13 @@ from stock_research_core.application.learning_orchestrator.ports import (
     LearningOrchestratorRunRepositoryPort,
     LearningOrchestratorThreadRepositoryPort,
 )
+from stock_research_core.application.live_research.ports import (
+    ClaimEvidenceLinkRepositoryPort,
+    EvidenceItemRepositoryPort,
+    ResearchClaimRepositoryPort,
+    ResearchRequestRepositoryPort,
+    ResearchRunRepositoryPort,
+)
 from stock_research_core.application.market_data.models import DataQualityIssue
 from stock_research_core.application.quality_evaluation.ports import (
     LearningQualityRepositoryPort,
@@ -280,6 +287,11 @@ class UnitOfWorkPort(Protocol):
     quality_evaluation_results: QualityEvaluationResultRepositoryPort
     quality_evaluation_baselines: QualityEvaluationBaselineRepositoryPort
     learning_quality: LearningQualityRepositoryPort
+    research_requests: ResearchRequestRepositoryPort
+    research_runs: ResearchRunRepositoryPort
+    evidence_items: EvidenceItemRepositoryPort
+    research_claims: ResearchClaimRepositoryPort
+    claim_evidence_links: ClaimEvidenceLinkRepositoryPort
 
     async def __aenter__(self) -> UnitOfWorkPort: ...
 
