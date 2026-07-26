@@ -9,3 +9,14 @@ Dockerfile text eol=lf
 # Environment templates are parsed on Linux
 .env.example text eol=lf
 .env.production.example text eol=lf
+
+# FinQuest knowledge seed text normalization
+.gitattributes text eol=lf
+knowledge/seed_documents/**/*.md text eol=lf
+knowledge/seed_documents/manifest.json text eol=lf
+scripts/validate_seed_knowledge.py text eol=lf
+tests/unit/test_validate_seed_knowledge.py text eol=lf
+infrastructure/aws/*.yaml text eol=lf
+docs/aws-s3-f1-setup.md text eol=lf
+docs/f1-env-block.txt text eol=lf
+docs/source-review-checklist.md text eol=lf

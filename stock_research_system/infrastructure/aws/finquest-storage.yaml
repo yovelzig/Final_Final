@@ -1,0 +1,162 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  FinQuest Phase F1a private S3 knowledge storage, a prefix-scoped EC2 IAM
+  role, and an instance profile. The profile is attached to the existing EC2
+  instance manually after this stack reaches CREATE_COMPLETE.
+
+Parameters:
+  BucketName:
+    Type: String
+    Default: finquest-knowledge-prod-881490130721-us-east-2
+    Description: >
+      Globally unique S3 bucket name. If AWS reports a collision, stop and
+      approve a documented deterministic suffix instead of silently randomizing.
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues:
+      - production
+      - staging
+      - development
+  AbortIncompleteMultipartUploadAfterDays:
+    Type: Number
+    Default: 7
+    MinValue: 1
+    MaxValue: 30
+
+Resources:
+  FinQuestKnowledgeBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Ref BucketName
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+            BucketKeyEnabled: false
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: AbortIncompleteMultipartUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation:
+                Ref: AbortIncompleteMultipartUploadAfterDays
+      Tags:
+        - Key: Project
+          Value: FinQuest
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Purpose
+          Value: KnowledgeAndResearchArtifacts
+
+  FinQuestKnowledgeBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FinQuestKnowledgeBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt FinQuestKnowledgeBucket.Arn
+              - !Sub "${FinQuestKnowledgeBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  FinQuestEc2StorageRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "finquest-${Environment}-ec2-storage-role"
+      Description: >
+        Least-privilege access to FinQuest knowledge, extracted-text, and
+        research-artifact prefixes in one private bucket.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: FinQuestScopedS3Access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: BucketLocation
+                Effect: Allow
+                Action:
+                  - s3:GetBucketLocation
+                Resource: !GetAtt FinQuestKnowledgeBucket.Arn
+              - Sid: ScopedList
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !GetAtt FinQuestKnowledgeBucket.Arn
+                Condition:
+                  StringLike:
+                    s3:prefix:
+                      - knowledge
+                      - knowledge/*
+                      - knowledge-extracted
+                      - knowledge-extracted/*
+                      - research-artifacts
+                      - research-artifacts/*
+              - Sid: ScopedObjectReadWrite
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                  - s3:AbortMultipartUpload
+                Resource:
+                  - !Sub "${FinQuestKnowledgeBucket.Arn}/knowledge/*"
+                  - !Sub "${FinQuestKnowledgeBucket.Arn}/knowledge-extracted/*"
+                  - !Sub "${FinQuestKnowledgeBucket.Arn}/research-artifacts/*"
+      Tags:
+        - Key: Project
+          Value: FinQuest
+        - Key: Environment
+          Value: !Ref Environment
+
+  FinQuestEc2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub "finquest-${Environment}-ec2-storage-profile"
+      Roles:
+        - !Ref FinQuestEc2StorageRole
+
+Outputs:
+  BucketName:
+    Description: S3 bucket name to place in future application configuration.
+    Value: !Ref FinQuestKnowledgeBucket
+  BucketArn:
+    Value: !GetAtt FinQuestKnowledgeBucket.Arn
+  Ec2RoleName:
+    Value: !Ref FinQuestEc2StorageRole
+  InstanceProfileName:
+    Description: Select this profile in EC2 Actions > Security > Modify IAM role.
+    Value: !Ref FinQuestEc2InstanceProfile
+  KnowledgePrefix:
+    Value: knowledge/
+  ExtractedTextPrefix:
+    Value: knowledge-extracted/
+  ResearchArtifactPrefix:
+    Value: research-artifacts/

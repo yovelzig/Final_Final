@@ -1,0 +1,12 @@
+# Phase F1b — enable only after the application S3 adapter is implemented and tested
+OBJECT_STORAGE_PROVIDER=s3
+AWS_REGION=us-east-2
+S3_BUCKET_NAME=finquest-knowledge-prod-881490130721-us-east-2
+S3_KNOWLEDGE_PREFIX=knowledge/
+S3_EXTRACTED_TEXT_PREFIX=knowledge-extracted/
+S3_RESEARCH_ARTIFACT_PREFIX=research-artifacts/
+S3_FORCE_PATH_STYLE=false
+S3_PRESIGNED_URL_EXPIRY_SECONDS=900
+
+# Production credentials must come from the EC2 Instance Profile.
+# Do not add AWS_ACCESS_KEY_ID or AWS_SECRET_ACCESS_KEY to the EC2 .env.

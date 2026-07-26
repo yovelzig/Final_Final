@@ -1,0 +1,403 @@
+{
+  "collection": "finquest_core_financial_education",
+  "version": 1,
+  "language": "en",
+  "document_count": 15,
+  "generated_at": "2026-07-26",
+  "documents": [
+    {
+      "document_id": "kb-en-001",
+      "filename": "en/01_financial_foundations.md",
+      "title": "Financial Foundations",
+      "slug": "financial-foundations",
+      "difficulty": [
+        "beginner"
+      ],
+      "concept_ids": [
+        "financial_goal",
+        "cash_flow",
+        "asset",
+        "liability",
+        "net_worth",
+        "liquidity"
+      ],
+      "review_status": "approved_seed",
+      "content_hash": "f61f7b651afef392cafe31c5029cab78c2b92a0622776fe5d90ea3f90ba8d9f2"
+    },
+    {
+      "document_id": "kb-en-002",
+      "filename": "en/02_budgeting_and_emergency_funds.md",
+      "title": "Budgeting and Emergency Funds",
+      "slug": "budgeting-and-emergency-funds",
+      "difficulty": [
+        "beginner"
+      ],
+      "concept_ids": [
+        "budget",
+        "fixed_expense",
+        "variable_expense",
+        "discretionary_expense",
+        "irregular_expense",
+        "positive_cash_flow",
+        "negative_cash_flow",
+        "emergency_fund",
+        "sinking_fund",
+        "opportunity_cost",
+        "debt_prioritization",
+        "goal_horizon"
+      ],
+      "review_status": "approved_seed",
+      "content_hash": "bbb27a19cd39753a7c8c2615b283223ea9741b86856a2fd867432958b7b0a40a"
+    },
+    {
+      "document_id": "kb-en-003",
+      "filename": "en/03_interest_and_compound_interest.md",
+      "title": "Interest and Compound Interest",
+      "slug": "interest-and-compound-interest",
+      "difficulty": [
+        "beginner"
+      ],
+      "concept_ids": [
+        "principal",
+        "interest_rate",
+        "simple_interest",
+        "compound_interest",
+        "compounding_frequency",
+        "annual_percentage_rate",
+        "effective_annual_rate",
+        "annual_percentage_yield",
+        "present_value",
+        "future_value",
+        "fee_drag",
+        "debt_compounding",
+        "investment_compounding"
+      ],
+      "review_status": "approved_seed",
+      "content_hash": "6b6fa77ba7e463d935074f599ef1ea2c9c393a85de5cd239ae6be5c56c21d4ef"
+    },
+    {
+      "document_id": "kb-en-004",
+      "filename": "en/04_inflation_and_time_value_of_money.md",
+      "title": "Inflation and the Time Value of Money",
+      "slug": "inflation-and-time-value-of-money",
+      "difficulty": [
+        "beginner",
+        "intermediate"
+      ],
+      "concept_ids": [
+        "inflation",
+        "purchasing_power",
+        "nominal_return",
+        "real_return",
+        "discounting",
+        "present_value",
+        "future_value",
+        "opportunity_cost",
+        "time_horizon",
+        "inflation_uncertainty",
+        "nominal_income",
+        "real_income"
+      ],
+      "review_status": "approved_seed",
+      "content_hash": "496c397fcaa6f2364b1081ebb70aa379db1299f6688879ec1fa8360f363da86c"
+    },
+    {
+      "document_id": "kb-en-005",
+      "filename": "en/05_stocks_bonds_and_etfs.md",
+      "title": "Stocks, Bonds, and ETFs",
+      "slug": "stocks-bonds-and-etfs",
+      "difficulty": [
+        "beginner"
+      ],
+      "concept_ids": [
+        "stock",
+        "common_stock",
+        "ownership",
+        "dividend",
+        "capital_appreciation",
+        "bond",
+        "principal",
+        "coupon",
+        "maturity",
+        "credit_risk",
+        "interest_rate_risk",
+        "etf",
+        "index_tracking_etf",
+        "actively_managed_etf",
+        "expense_ratio",
+        "liquidity",
+        "tracking_difference",
+        "diversification_limitations",
+        "net_asset_value"
+      ],
+      "review_status": "approved_seed",
+      "content_hash": "088690ebe7d7e215946daac72bbdd9ce2ffcbd5951dbc2893bd1e47e406ba254"
+    },
+    {
+      "document_id": "kb-en-006",
+      "filename": "en/06_market_structure_and_order_types.md",
+      "title": "Market Structure and Order Types",
+      "slug": "market-structure-and-order-types",
+      "difficulty": [
+        "beginner",
+        "intermediate"
+      ],
+      "concept_ids": [
+        "primary_market",
+        "secondary_market",
+        "exchange",
+        "broker",
+        "market_maker",
+        "bid",
+        "ask",
+        "spread",
+        "liquidity",
+        "trading_volume",
+        "volatility",
+        "market_order",
+        "limit_order",
+        "stop_order",
+        "slippage",
+        "trading_hours",
+        "settlement",
+        "execution_uncertainty"
+      ],
+      "review_status": "approved_seed",
+      "content_hash": "1f0d6c2c2948fc0bed80663e881bfbd3b249b9a783b95b275c3a3d6e018a7555"
+    },
+    {
+      "document_id": "kb-en-007",
+      "filename": "en/07_financial_statements.md",
+      "title": "Financial Statements",
+      "slug": "financial-statements",
+      "difficulty": [
+        "beginner",
+        "intermediate"
+      ],
+      "concept_ids": [
+        "financial_reporting",
+        "income_statement",
+        "revenue",
+        "cost_of_revenue",
+        "gross_profit",
+        "operating_expenses",
+        "operating_income",
+        "net_income",
+        "balance_sheet",
+        "assets",
+        "liabilities",
+        "shareholders_equity",
+        "cash_flow_statement",
+        "operating_cash_flow",
+        "investing_cash_flow",
+        "financing_cash_flow",
+        "accrual_accounting",
+        "financial_statement_notes"
+      ],
+      "review_status": "approved_seed",
+      "content_hash": "cd4a95752fe24418f0a48921c1c683de4b709085fe35e9a425d33ccc225de9cf"
+    },
+    {
+      "document_id": "kb-en-008",
+      "filename": "en/08_financial_ratios.md",
+      "title": "Financial Ratios",
+      "slug": "financial-ratios",
+      "difficulty": [
+        "intermediate"
+      ],
+      "concept_ids": [
+        "gross_margin",
+        "operating_margin",
+        "net_margin",
+        "current_ratio",
+        "quick_ratio",
+        "debt_to_equity",
+        "return_on_assets",
+        "return_on_equity",
+        "earnings_per_share",
+        "price_earnings_ratio",
+        "free_cash_flow",
+        "industry_comparison",
+        "accounting_quality"
+      ],
+      "review_status": "approved_seed",
+      "content_hash": "00108a5c00a81d258cc885b23758ed90bd26d0fc7663cf28ef8326d5ba9818db"
+    },
+    {
+      "document_id": "kb-en-009",
+      "filename": "en/09_fundamental_analysis.md",
+      "title": "Fundamental Analysis",
+      "slug": "fundamental-analysis",
+      "difficulty": [
+        "intermediate"
+      ],
+      "concept_ids": [
+        "business_model",
+        "competitive_advantage",
+        "industry_analysis",
+        "management_quality",
+        "earnings_quality",
+        "valuation",
+        "margin_of_safety",
+        "scenario_analysis"
+      ],
+      "review_status": "approved_seed",
+      "content_hash": "3733501670cff4f65a5f0706e0a4e22a60aab6ef8ab412baf6212f668280992e"
+    },
+    {
+      "document_id": "kb-en-010",
+      "filename": "en/10_portfolio_construction_and_diversification.md",
+      "title": "Portfolio Construction and Diversification",
+      "slug": "portfolio-construction-and-diversification",
+      "difficulty": [
+        "beginner",
+        "intermediate"
+      ],
+      "concept_ids": [
+        "portfolio",
+        "investment_objective",
+        "asset_allocation",
+        "diversification",
+        "correlation",
+        "concentration_risk",
+        "position_sizing",
+        "rebalancing",
+        "time_horizon",
+        "risk_tolerance",
+        "portfolio_constraints"
+      ],
+      "review_status": "approved_seed",
+      "content_hash": "74581cfb28acd1e2da2af73f958927db185eb509b03db7de0af27a9f6dd3cb38"
+    },
+    {
+      "document_id": "kb-en-011",
+      "filename": "en/11_risk_volatility_and_drawdown.md",
+      "title": "Risk, Volatility, and Drawdown",
+      "slug": "risk-volatility-and-drawdown",
+      "difficulty": [
+        "intermediate"
+      ],
+      "concept_ids": [
+        "risk",
+        "volatility",
+        "standard_deviation",
+        "downside_risk",
+        "drawdown",
+        "maximum_drawdown",
+        "permanent_capital_loss",
+        "liquidity_risk",
+        "credit_risk",
+        "interest_rate_risk",
+        "inflation_risk",
+        "currency_risk",
+        "concentration_risk",
+        "sequence_of_returns_risk",
+        "leverage_risk",
+        "risk_capacity",
+        "risk_willingness"
+      ],
+      "review_status": "approved_seed",
+      "content_hash": "23b9e820d59f43c2b998ca2cf10df8ecfdc33277092b7e2a0b6a9f90f837a5f3"
+    },
+    {
+      "document_id": "kb-en-012",
+      "filename": "en/12_behavioral_finance.md",
+      "title": "Behavioral Finance",
+      "slug": "behavioral-finance",
+      "difficulty": [
+        "beginner",
+        "intermediate"
+      ],
+      "concept_ids": [
+        "behavioral_finance",
+        "overconfidence",
+        "confirmation_bias",
+        "anchoring",
+        "loss_aversion",
+        "recency_bias",
+        "herding",
+        "familiarity_bias",
+        "disposition_effect",
+        "outcome_bias",
+        "hindsight_bias",
+        "action_bias",
+        "fear_of_missing_out",
+        "precommitment",
+        "decision_journal"
+      ],
+      "review_status": "approved_seed",
+      "content_hash": "b34392d6e7a63ff60a70bff10094dda5ac96c61e489fd1162450042755a42b2e"
+    },
+    {
+      "document_id": "kb-en-013",
+      "filename": "en/13_technical_analysis_foundations.md",
+      "title": "Technical Analysis Foundations",
+      "slug": "technical-analysis-foundations",
+      "difficulty": [
+        "intermediate"
+      ],
+      "concept_ids": [
+        "price_chart",
+        "candlestick",
+        "timeframe",
+        "trend",
+        "support_resistance",
+        "moving_average",
+        "momentum",
+        "volume",
+        "relative_strength_index",
+        "moving_average_convergence_divergence",
+        "breakout",
+        "false_breakout",
+        "backtest",
+        "overfitting",
+        "transaction_cost"
+      ],
+      "review_status": "approved_seed",
+      "content_hash": "071ac86be51c1033a570ced2f4b1ff763e8f4b024f0e7fbb49fff6f327714ac4"
+    },
+    {
+      "document_id": "kb-en-014",
+      "filename": "en/14_historical_market_crises.md",
+      "title": "Historical Market Crises",
+      "slug": "historical-market-crises",
+      "difficulty": [
+        "intermediate"
+      ],
+      "concept_ids": [
+        "financial_crisis",
+        "bank_run",
+        "leverage",
+        "liquidity_spiral",
+        "contagion",
+        "fire_sale",
+        "policy_response",
+        "future_information_leakage"
+      ],
+      "review_status": "approved_seed",
+      "content_hash": "a51538e032c239270ab45ebc270b78b04450b8a7ac3387f658b95d424c1b551c"
+    },
+    {
+      "document_id": "kb-en-015",
+      "filename": "en/15_investment_thesis_and_decision_journal.md",
+      "title": "Investment Thesis and Decision Journal",
+      "slug": "investment-thesis-and-decision-journal",
+      "difficulty": [
+        "intermediate"
+      ],
+      "concept_ids": [
+        "investment_thesis",
+        "variant_perception",
+        "evidence",
+        "assumption",
+        "scenario",
+        "catalyst",
+        "thesis_breaker",
+        "decision_journal",
+        "review_cycle"
+      ],
+      "review_status": "approved_seed",
+      "content_hash": "727bbb97d0edaed02c3e8ab26beff515e9746f4aad639339e2b88065f35c8134"
+    }
+  ]
+}
