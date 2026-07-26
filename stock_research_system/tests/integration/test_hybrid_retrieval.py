@@ -8,12 +8,32 @@ HNSW query path is exercised without downloading a real model.
 from __future__ import annotations
 
 import hashlib
+import json
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
-from stock_research_core.domain.ai_tutor.enums import KnowledgeApprovalStatus, KnowledgeDocumentStatus, KnowledgeSourceType
+from stock_research_core.application.ai_tutor.chunking import HeadingAwareWordChunker
+from stock_research_core.application.ai_tutor.knowledge_ingestion import KnowledgeIngestionService
+from stock_research_core.application.ai_tutor.manifest_ingestion import ManifestIngestionService
+from stock_research_core.application.ai_tutor.retrieval import HybridKnowledgeRetriever
+from stock_research_core.application.ai_tutor.seed_manifest import (
+    canonicalize_source_text,
+    compute_manifest_file_hash,
+    load_seed_manifest,
+)
+from stock_research_core.application.ai_tutor.models import TutorContext
+from stock_research_core.application.exceptions import ObjectNotFoundError
+from stock_research_core.application.object_storage.models import ObjectReference, StoredObject
+from stock_research_core.domain.ai_tutor.enums import (
+    KnowledgeApprovalStatus,
+    KnowledgeDocumentStatus,
+    KnowledgeSourceType,
+    TutorContextType,
+)
 from stock_research_core.domain.ai_tutor.models import KnowledgeChunk, KnowledgeChunkEmbedding, KnowledgeDocument, KnowledgeSource
 from stock_research_core.domain.learning.enums import DifficultyLevel, LessonStatus
 from stock_research_core.domain.learning.models import Lesson, LearningModule, LearningPath
@@ -236,3 +256,138 @@ async def test_get_chunk_with_metadata_returns_full_candidate(uow_factory, embed
 async def test_get_chunk_with_metadata_returns_none_for_unknown_chunk(uow_factory) -> None:
     async with uow_factory() as uow:
         assert await uow.knowledge.get_chunk_with_metadata(uuid4()) is None
+
+
+# -- C3 smoke test: a manifest-ingested document is retrievable via hybrid search ---------------------
+#
+# Small in-memory `ObjectStoragePort` fake, test-only (per the C3 spec -
+# no fake adapter lives under `src/`, no real S3 call is ever made).
+
+
+@dataclass
+class _StoredVersion:
+    body: bytes
+    content_type: str
+    sha256: str
+    version_id: str
+
+
+class _FakeObjectStorage:
+    def __init__(self) -> None:
+        self._versions: dict[str, list[_StoredVersion]] = {}
+        self._version_seq = 0
+
+    async def put_object(self, *, key: str, body: bytes, content_type: str) -> ObjectReference:
+        self._version_seq += 1
+        version_id = f"v{self._version_seq}"
+        sha256 = hashlib.sha256(body).hexdigest()
+        self._versions.setdefault(key, []).append(
+            _StoredVersion(body=body, content_type=content_type, sha256=sha256, version_id=version_id)
+        )
+        return ObjectReference(
+            bucket="fake-bucket", key=key, content_type=content_type, byte_length=len(body),
+            sha256=sha256, version_id=version_id,
+        )
+
+    async def head_object(self, *, key: str, version_id: str | None = None) -> ObjectReference:
+        record = self._resolve(key, version_id)
+        if record is None:
+            raise ObjectNotFoundError(f"no object at key {key!r}")
+        return ObjectReference(
+            bucket="fake-bucket", key=key, content_type=record.content_type, byte_length=len(record.body),
+            sha256=record.sha256, version_id=record.version_id,
+        )
+
+    async def get_object(self, *, key: str, version_id: str | None = None) -> StoredObject:
+        record = self._resolve(key, version_id)
+        if record is None:
+            raise ObjectNotFoundError(f"no object at key {key!r} version {version_id!r}")
+        return StoredObject(
+            body=record.body,
+            reference=ObjectReference(
+                bucket="fake-bucket", key=key, content_type=record.content_type, byte_length=len(record.body),
+                sha256=record.sha256, version_id=record.version_id,
+            ),
+        )
+
+    def _resolve(self, key: str, version_id: str | None) -> _StoredVersion | None:
+        versions = self._versions.get(key, [])
+        if not versions:
+            return None
+        if version_id is None:
+            return versions[-1]
+        return next((v for v in versions if v.version_id == version_id), None)
+
+
+def _manifest_seed_source(*, document_id: str, title: str, body_paragraph: str) -> str:
+    return (
+        "---\n"
+        f'document_id: "{document_id}"\n'
+        f'title: "{title}"\n'
+        "version: 1\n"
+        'language: "en"\n'
+        'review_status: "approved_seed"\n'
+        "---\n"
+        "\n"
+        f"# {title}\n"
+        "\n"
+        "## Section One\n"
+        "\n"
+        f"{body_paragraph}\n"
+    )
+
+
+async def test_manifest_ingested_document_is_retrievable_via_hybrid_search(tmp_path: Path, uow_factory, embedder) -> None:
+    """End-to-end C3 smoke test: `ManifestIngestionService` (against a fake
+    `ObjectStoragePort`) ingests one approved seed document through the
+    real `KnowledgeIngestionService`, and the existing
+    `HybridKnowledgeRetriever` - unmodified - surfaces it for a matching
+    query. Proves C3 plugs into retrieval without a second RAG pipeline."""
+    seed_root = tmp_path / "seed_documents"
+    body_paragraph = "Diversification across asset classes reduces idiosyncratic portfolio risk substantially."
+    source_text = _manifest_seed_source(document_id="kb-en-001", title="Diversification Basics", body_paragraph=body_paragraph)
+    doc_path = seed_root / "en" / "01_diversification.md"
+    doc_path.parent.mkdir(parents=True, exist_ok=True)
+    doc_path.write_text(source_text, encoding="utf-8", newline="\n")
+    file_hash = compute_manifest_file_hash(canonicalize_source_text(doc_path.read_bytes()))
+
+    manifest_path = seed_root / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "collection": "finquest_core_financial_education", "version": 1, "language": "en",
+                "document_count": 1,
+                "documents": [
+                    {
+                        "document_id": "kb-en-001", "filename": "en/01_diversification.md",
+                        "title": "Diversification Basics", "review_status": "approved_seed",
+                        "content_hash": file_hash,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest = load_seed_manifest(manifest_path)
+
+    ingestion_service = KnowledgeIngestionService(
+        unit_of_work_factory=uow_factory, chunker=HeadingAwareWordChunker(), embedding_provider=embedder,
+    )
+    manifest_service = ManifestIngestionService(
+        object_storage=_FakeObjectStorage(), knowledge_ingestion_service=ingestion_service,
+        seed_documents_root=seed_root, clock=lambda: NOW,
+    )
+
+    summary = await manifest_service.ingest(manifest=manifest)
+    assert summary.succeeded_count == 1
+    assert summary.results[0].documents_created == 1
+
+    retriever = HybridKnowledgeRetriever(unit_of_work_factory=uow_factory, embedding_provider=embedder)
+    context = TutorContext(context_type=TutorContextType.GENERAL_EDUCATION, learner_id=uuid4())
+
+    _run, candidates = await retriever.retrieve(
+        query="How does diversification reduce portfolio risk?", context=context, top_k=5
+    )
+
+    assert any("Diversification" in candidate.chunk.content for candidate in candidates)
+    assert all(candidate.source.approval_status == KnowledgeApprovalStatus.APPROVED for candidate in candidates)

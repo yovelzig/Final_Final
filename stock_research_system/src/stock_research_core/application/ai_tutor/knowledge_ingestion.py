@@ -206,12 +206,25 @@ class KnowledgeIngestionService:
         approval_status: KnowledgeApprovalStatus,
         skill_ids: list[UUID],
         available_at: datetime,
+        source_key: str | None = None,
     ) -> KnowledgeIngestionSummary:
+        """Ingest one local file as a `KnowledgeDocument`.
+
+        `source_key` is an optional stable logical identity (e.g. a
+        manifest document code like `kb-en-001`) used instead of
+        `source_title` to derive the deterministic `KnowledgeSource`
+        source_id and content-derived document identity - so a
+        human-readable title can change without minting a new source or
+        document row. Callers that omit it keep the original behavior of
+        deriving identity from `source_title` itself; `source_title`
+        always remains the human-readable `KnowledgeSource.title`.
+        """
         parsed = parse_local_document(file_path)
         counts = _Counts()
+        logical_source_key = source_key or source_title
 
         async with self._unit_of_work_factory() as uow:
-            source_id = uuid5(_NAMESPACE, f"source:local:{source_title}")
+            source_id = uuid5(_NAMESPACE, f"source:local:{logical_source_key}")
             existing_source = await uow.knowledge.get_source(source_id)
             source = KnowledgeSource(
                 source_id=source_id,
@@ -235,7 +248,7 @@ class KnowledgeIngestionService:
             )
 
             document = KnowledgeDocument(
-                document_id=self._content_derived_id(f"local:{source_title}", parsed.text),
+                document_id=self._content_derived_id(f"local:{logical_source_key}", parsed.text),
                 source_id=saved_source.source_id,
                 title=parsed.title or source_title,
                 content_text=parsed.text,
