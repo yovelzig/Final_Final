@@ -1,9 +1,18 @@
 import { http, HttpResponse } from "msw";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
+import { queryKeys } from "@/lib/api/query-keys";
 import { useLesson, useLessonExercises, useStartAttempt, useSubmitAnswer } from "@/hooks/useCurriculum";
 import { server } from "@/tests/mocks/server";
 import { renderHookWithQuery, waitFor } from "@/tests/test-utils";
+
+function createDeferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
 
 describe("curriculum hooks (integration)", () => {
   it("fetches a lesson and its exercises without leaking is_correct/feedback on options", async () => {
@@ -59,6 +68,7 @@ describe("curriculum hooks (integration)", () => {
           },
           updated_mastery: [],
           updated_progress: null,
+          explanation: null,
         });
       })
     );
@@ -72,5 +82,105 @@ describe("curriculum hooks (integration)", () => {
     submit.result.current.mutate({ selected_option_ids: ["a"] });
     await waitFor(() => expect(submit.result.current.isSuccess).toBe(true));
     expect(submit.result.current.data?.attempt.is_correct).toBe(true);
+  });
+
+  it("carries a populated explanation through to the submit-answer response", async () => {
+    server.use(
+      http.post("*/api/v1/attempts/attempt-explained/answers", () =>
+        HttpResponse.json({
+          attempt: {
+            attempt_id: "attempt-explained", attempt_number: 1, confidence_level: null, exercise_id: "ex-1",
+            graded_at: "2026-01-01T00:01:00Z", is_correct: true, maximum_score: 1, score: 1,
+            started_at: "2026-01-01T00:00:00Z", status: "GRADED", submitted_at: "2026-01-01T00:01:00Z",
+          },
+          updated_mastery: [],
+          updated_progress: null,
+          explanation: "Money's three functions are exchange, store of value, and unit of account.",
+        })
+      )
+    );
+
+    const submit = renderHookWithQuery(() => useSubmitAnswer("attempt-explained"));
+    submit.result.current.mutate({ selected_option_ids: ["a"] });
+    await waitFor(() => expect(submit.result.current.isSuccess).toBe(true));
+    expect(submit.result.current.data?.explanation).toBe(
+      "Money's three functions are exchange, store of value, and unit of account."
+    );
+  });
+
+  it("carries a null explanation through to the submit-answer response for an ungraded exercise", async () => {
+    server.use(
+      http.post("*/api/v1/attempts/attempt-ungraded/answers", () =>
+        HttpResponse.json({
+          attempt: {
+            attempt_id: "attempt-ungraded", attempt_number: 1, confidence_level: null, exercise_id: "ex-1",
+            graded_at: null, is_correct: null, maximum_score: 1, score: null,
+            started_at: "2026-01-01T00:00:00Z", status: "SUBMITTED", submitted_at: "2026-01-01T00:01:00Z",
+          },
+          updated_mastery: [],
+          updated_progress: null,
+          explanation: null,
+        })
+      )
+    );
+
+    const submit = renderHookWithQuery(() => useSubmitAnswer("attempt-ungraded"));
+    submit.result.current.mutate({ text_answer: "My reasoning" });
+    await waitFor(() => expect(submit.result.current.isSuccess).toBe(true));
+    expect(submit.result.current.data?.explanation).toBeNull();
+  });
+
+  it("awaits all three learner-cache invalidations before the mutation settles, and invalidates only dashboard/mastery/progress", async () => {
+    server.use(
+      http.post("*/api/v1/attempts/attempt-deferred/answers", () =>
+        HttpResponse.json({
+          attempt: {
+            attempt_id: "attempt-deferred", attempt_number: 1, confidence_level: null, exercise_id: "ex-1",
+            graded_at: "2026-01-01T00:01:00Z", is_correct: true, maximum_score: 1, score: 1,
+            started_at: "2026-01-01T00:00:00Z", status: "GRADED", submitted_at: "2026-01-01T00:01:00Z",
+          },
+          updated_mastery: [],
+          updated_progress: null,
+          explanation: null,
+        })
+      )
+    );
+
+    const { result, queryClient } = renderHookWithQuery(() => useSubmitAnswer("attempt-deferred"));
+
+    const dashboardDeferred = createDeferred<void>();
+    const masteryDeferred = createDeferred<void>();
+    const progressDeferred = createDeferred<void>();
+
+    const invalidateSpy = vi
+      .spyOn(queryClient, "invalidateQueries")
+      .mockImplementation((filters?: { queryKey?: readonly unknown[] }) => {
+        const key = filters?.queryKey ?? [];
+        if (key[0] === "learner" && key[1] === "dashboard") return dashboardDeferred.promise;
+        if (key[0] === "learner" && key[1] === "mastery") return masteryDeferred.promise;
+        if (key[0] === "learner" && key[1] === "progress") return progressDeferred.promise;
+        throw new Error(`Unexpected invalidateQueries call for key ${JSON.stringify(key)}`);
+      });
+
+    result.current.mutate({ selected_option_ids: ["a"] });
+
+    await waitFor(() => expect(invalidateSpy).toHaveBeenCalledTimes(3));
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: queryKeys.learner.dashboard() });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: queryKeys.learner.mastery() });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: queryKeys.learner.progress() });
+    expect(invalidateSpy.mock.calls.every(([call]) => (call?.queryKey ?? [])[0] === "learner")).toBe(true);
+
+    // None of the three invalidations have resolved yet - the mutation must still be pending.
+    expect(result.current.isSuccess).toBe(false);
+
+    dashboardDeferred.resolve();
+    masteryDeferred.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    // Two of three resolved; Promise.all cannot settle until the third does too.
+    expect(result.current.isSuccess).toBe(false);
+
+    progressDeferred.resolve();
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
   });
 });

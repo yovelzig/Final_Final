@@ -5,7 +5,8 @@ import type { SubmitAnswerResponse } from "@/types/api-schemas";
 /** Renders only backend-provided grading data - never recomputes or
  * guesses correctness/score itself. */
 export function ExerciseResult({ result }: { result: SubmitAnswerResponse }) {
-  const { attempt, updated_mastery, updated_progress } = result;
+  const { attempt, updated_mastery, updated_progress, explanation } = result;
+  const hasExplanation = typeof explanation === "string" && explanation.trim().length > 0;
   const scoreLabel =
     attempt.score !== null ? `Score: ${attempt.score} out of ${attempt.maximum_score}.` : undefined;
 
@@ -35,7 +36,12 @@ export function ExerciseResult({ result }: { result: SubmitAnswerResponse }) {
       ) : null}
       {updated_progress ? (
         <p className="mt-1 text-xs text-muted">
-          Lesson progress: {Math.round(updated_progress.completion_percentage * 100)}% complete.
+          Lesson progress: {Math.round(updated_progress.completion_percentage)}% complete.
+        </p>
+      ) : null}
+      {hasExplanation ? (
+        <p data-testid="exercise-explanation" className="mt-3 text-sm text-slate-700">
+          {explanation}
         </p>
       ) : null}
     </div>

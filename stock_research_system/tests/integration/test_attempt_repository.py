@@ -6,7 +6,9 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
+from stock_research_core.application.exceptions import InvalidAttemptStateError
 from stock_research_core.domain.learning.enums import (
     AttemptStatus,
     DifficultyLevel,
@@ -175,3 +177,54 @@ async def test_get_attempt_returns_none_when_missing(uow_factory) -> None:
     async with uow_factory() as uow:
         result = await uow.attempts.get_attempt(uuid4())
     assert result is None
+
+
+async def test_duplicate_answer_for_same_attempt_is_translated_to_invalid_attempt_state(
+    uow_factory,
+) -> None:
+    """Exercises the real Postgres unique constraint on
+    `exercise_answers.attempt_id` end to end - proves the constraint-name
+    check in `attempt_repository.save_answer` matches what the live
+    asyncpg driver actually reports, not just what the migration source
+    implies."""
+    learner, exercise, correct, _ = await _seed_exercise_with_options(uow_factory)
+    attempt = ExerciseAttempt(
+        learner_id=learner.learner_id, exercise_id=exercise.exercise_id,
+        maximum_score=exercise.maximum_score, attempt_number=1,
+    )
+    async with uow_factory() as uow:
+        await uow.attempts.create_attempt(attempt)
+        await uow.commit()
+
+    async with uow_factory() as uow:
+        await uow.attempts.save_answer(
+            ExerciseAnswer(attempt_id=attempt.attempt_id, selected_option_ids=[correct.option_id])
+        )
+        await uow.commit()
+
+    async with uow_factory() as uow:
+        with pytest.raises(InvalidAttemptStateError):
+            await uow.attempts.save_answer(
+                ExerciseAnswer(attempt_id=attempt.attempt_id, selected_option_ids=[correct.option_id])
+            )
+
+
+async def test_unrelated_integrity_violation_is_not_translated(uow_factory) -> None:
+    """A foreign-key violation (selecting a nonexistent option) hits a
+    completely different Postgres constraint than
+    `exercise_answers_attempt_id_key` - it must propagate as a plain
+    `IntegrityError`, never as `InvalidAttemptStateError`."""
+    learner, exercise, _correct, _incorrect = await _seed_exercise_with_options(uow_factory)
+    attempt = ExerciseAttempt(
+        learner_id=learner.learner_id, exercise_id=exercise.exercise_id,
+        maximum_score=exercise.maximum_score, attempt_number=1,
+    )
+    async with uow_factory() as uow:
+        await uow.attempts.create_attempt(attempt)
+        await uow.commit()
+
+    async with uow_factory() as uow:
+        with pytest.raises(IntegrityError):
+            await uow.attempts.save_answer(
+                ExerciseAnswer(attempt_id=attempt.attempt_id, selected_option_ids=[uuid4()])
+            )

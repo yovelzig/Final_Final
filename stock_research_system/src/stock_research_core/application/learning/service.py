@@ -15,8 +15,11 @@ from uuid import UUID
 from stock_research_core.application.exceptions import (
     ExerciseAttemptNotFoundError,
     ExerciseNotFoundError,
+    InvalidAttemptStateError,
     InvalidGradingRequestError,
     LearnerNotFoundError,
+    LearningModuleNotFoundError,
+    LearningPathNotFoundError,
     LessonNotFoundError,
 )
 from stock_research_core.application.learning.grading import grade_answer
@@ -34,13 +37,17 @@ from stock_research_core.domain.learning.enums import (
     AttemptStatus,
     ConfidenceLevel,
     DifficultyLevel,
+    LessonStatus,
     ProgressStatus,
 )
 from stock_research_core.domain.learning.models import (
     Exercise,
     ExerciseAnswer,
     ExerciseAttempt,
+    ExerciseOption,
     LearnerProfile,
+    LearningModule,
+    LearningPath,
     Lesson,
     SkillMastery,
     UserProgress,
@@ -80,10 +87,8 @@ class LearningService:
 
     async def get_lesson_with_exercises(self, lesson_id: UUID) -> LessonWithExercises:
         async with self._unit_of_work_factory() as uow:
-            lesson = await uow.curriculum.get_lesson(lesson_id)
-            if lesson is None:
-                raise LessonNotFoundError(f"No lesson found with id '{lesson_id}'.")
-            exercises = await uow.curriculum.list_exercises(lesson_id)
+            lesson = await self._get_visible_lesson(uow, lesson_id)
+            exercises = await uow.curriculum.list_exercises(lesson_id, active_only=True)
             options_by_exercise = {
                 exercise.exercise_id: await uow.curriculum.list_options(exercise.exercise_id)
                 for exercise in exercises
@@ -91,6 +96,96 @@ class LearningService:
         return LessonWithExercises(
             lesson=lesson, exercises=exercises, options_by_exercise=options_by_exercise
         )
+
+    # -- learner-facing visibility ------------------------------------------
+    #
+    # The learner-facing curriculum hierarchy requires the *complete*
+    # ancestor chain to be visible, not just the requested resource's own
+    # flag: a published lesson sitting under an unpublished module must
+    # still be hidden. Each `_get_visible_*` helper re-raises using the
+    # *requested* resource's own NotFound error regardless of which
+    # ancestor actually failed, so the API never leaks which level of the
+    # chain was hidden - the same "404, not 403" convention already used
+    # for attempt ownership checks elsewhere in this service.
+    #
+    # Every public method below opens exactly one Unit of Work and
+    # delegates to a private `_get_visible_*`/`_list_visible_*` helper that
+    # takes that same `uow` and never opens another one - a single learner
+    # request validates the whole ancestor chain (and performs whatever
+    # operation depends on it) inside one transaction, not one transaction
+    # per hierarchy level. Admin/content-authoring access goes through
+    # `uow.curriculum.get_*`/`list_*` directly (in `api/routers/admin.py`)
+    # and is unaffected: the repository's `published_only`/`active_only`
+    # filters default to `False`.
+
+    async def _get_visible_path(self, uow: UnitOfWorkPort, path_id: UUID) -> LearningPath:
+        path = await uow.curriculum.get_path(path_id)
+        if path is None or not path.published:
+            raise LearningPathNotFoundError(f"No learning path found with id '{path_id}'.")
+        return path
+
+    async def _get_visible_module(self, uow: UnitOfWorkPort, module_id: UUID) -> LearningModule:
+        module = await uow.curriculum.get_module(module_id)
+        if module is None or not module.published:
+            raise LearningModuleNotFoundError(f"No learning module found with id '{module_id}'.")
+        try:
+            await self._get_visible_path(uow, module.path_id)
+        except LearningPathNotFoundError as exc:
+            raise LearningModuleNotFoundError(
+                f"No learning module found with id '{module_id}'."
+            ) from exc
+        return module
+
+    async def _get_visible_lesson(self, uow: UnitOfWorkPort, lesson_id: UUID) -> Lesson:
+        lesson = await uow.curriculum.get_lesson(lesson_id)
+        if lesson is None or lesson.status != LessonStatus.PUBLISHED:
+            raise LessonNotFoundError(f"No lesson found with id '{lesson_id}'.")
+        try:
+            await self._get_visible_module(uow, lesson.module_id)
+        except LearningModuleNotFoundError as exc:
+            raise LessonNotFoundError(f"No lesson found with id '{lesson_id}'.") from exc
+        return lesson
+
+    async def _get_visible_exercise(
+        self, uow: UnitOfWorkPort, exercise_id: UUID
+    ) -> tuple[Exercise, list[ExerciseOption]]:
+        exercise = await uow.curriculum.get_exercise(exercise_id)
+        if exercise is None or not exercise.active:
+            raise ExerciseNotFoundError(f"No exercise found with id '{exercise_id}'.")
+        try:
+            await self._get_visible_lesson(uow, exercise.lesson_id)
+        except LessonNotFoundError as exc:
+            raise ExerciseNotFoundError(f"No exercise found with id '{exercise_id}'.") from exc
+        options = await uow.curriculum.list_options(exercise_id)
+        return exercise, options
+
+    async def get_visible_path(self, path_id: UUID) -> LearningPath:
+        async with self._unit_of_work_factory() as uow:
+            return await self._get_visible_path(uow, path_id)
+
+    async def list_visible_modules(self, path_id: UUID) -> list[LearningModule]:
+        async with self._unit_of_work_factory() as uow:
+            await self._get_visible_path(uow, path_id)
+            return await uow.curriculum.list_modules(path_id, published_only=True)
+
+    async def get_visible_module(self, module_id: UUID) -> LearningModule:
+        async with self._unit_of_work_factory() as uow:
+            return await self._get_visible_module(uow, module_id)
+
+    async def list_visible_lessons(self, module_id: UUID) -> list[Lesson]:
+        async with self._unit_of_work_factory() as uow:
+            await self._get_visible_module(uow, module_id)
+            return await uow.curriculum.list_lessons(module_id, published_only=True)
+
+    async def get_visible_lesson(self, lesson_id: UUID) -> Lesson:
+        async with self._unit_of_work_factory() as uow:
+            return await self._get_visible_lesson(uow, lesson_id)
+
+    async def get_visible_exercise(
+        self, exercise_id: UUID
+    ) -> tuple[Exercise, list[ExerciseOption]]:
+        async with self._unit_of_work_factory() as uow:
+            return await self._get_visible_exercise(uow, exercise_id)
 
     async def start_exercise_attempt(
         self,
@@ -100,9 +195,7 @@ class LearningService:
         confidence_level: ConfidenceLevel | None = None,
     ) -> ExerciseAttempt:
         async with self._unit_of_work_factory() as uow:
-            exercise = await uow.curriculum.get_exercise(exercise_id)
-            if exercise is None:
-                raise ExerciseNotFoundError(f"No exercise found with id '{exercise_id}'.")
+            exercise, _options = await self._get_visible_exercise(uow, exercise_id)
 
             previous_attempts = await uow.attempts.list_attempts(learner_id, exercise_id)
             attempt_number = len(previous_attempts) + 1
@@ -123,10 +216,21 @@ class LearningService:
     ) -> LearningActivityResult:
         now = utc_now()
         async with self._unit_of_work_factory() as uow:
-            attempt = await uow.attempts.get_attempt(attempt_id)
+            # `get_attempt_for_update` takes a `SELECT ... FOR UPDATE` row
+            # lock inside this transaction: a second concurrent submitter
+            # for the same attempt blocks here until this transaction
+            # commits or rolls back, then observes the now-updated status
+            # below instead of both requests reading STARTED and racing to
+            # grade the same attempt.
+            attempt = await uow.attempts.get_attempt_for_update(attempt_id)
             if attempt is None:
                 raise ExerciseAttemptNotFoundError(
                     f"No exercise attempt found with id '{attempt_id}'."
+                )
+            if attempt.status != AttemptStatus.STARTED:
+                raise InvalidAttemptStateError(
+                    f"Attempt '{attempt_id}' is '{attempt.status.value}' and can only be "
+                    "submitted once, from status STARTED."
                 )
             if answer.attempt_id != attempt_id:
                 raise InvalidGradingRequestError(
@@ -154,6 +258,7 @@ class LearningService:
                         now=now,
                     )
                 )
+                explanation = exercise.explanation
             else:
                 saved_answer = await uow.attempts.save_answer(answer)
                 submitted_at = max(answer.submitted_at, attempt.started_at)
@@ -167,6 +272,7 @@ class LearningService:
                 stored_attempt = await uow.attempts.update_attempt(updated_attempt)
                 updated_mastery = []
                 updated_progress = None
+                explanation = None
 
             await uow.commit()
 
@@ -175,6 +281,7 @@ class LearningService:
             answer=saved_answer,
             updated_mastery=updated_mastery,
             updated_progress=updated_progress,
+            explanation=explanation,
         )
 
     async def submit_externally_graded_answer(
@@ -318,8 +425,12 @@ class LearningService:
             current_lesson: Lesson | None = None
 
             if active_path is not None:
-                for module in await uow.curriculum.list_modules(active_path.path_id):
-                    for lesson in await uow.curriculum.list_lessons(module.module_id):
+                for module in await uow.curriculum.list_modules(
+                    active_path.path_id, published_only=True
+                ):
+                    for lesson in await uow.curriculum.list_lessons(
+                        module.module_id, published_only=True
+                    ):
                         path_lesson_ids.append(lesson.lesson_id)
                         if current_lesson is None and lesson.lesson_id not in completed_lesson_ids:
                             current_lesson = lesson
@@ -357,7 +468,10 @@ class LearningService:
         lesson_id = exercise.lesson_id
         existing = await uow.progress.get_lesson_progress(learner_id, lesson_id)
 
-        lesson_exercises = await uow.curriculum.list_exercises(lesson_id)
+        lesson_exercises = await uow.curriculum.list_exercises(
+            lesson_id,
+            active_only=True,
+        )
         lesson_exercise_ids = {ex.exercise_id for ex in lesson_exercises}
 
         learner_attempts = await uow.attempts.list_attempts(learner_id)
@@ -368,7 +482,7 @@ class LearningService:
             and a.status == AttemptStatus.GRADED
             and a.is_correct
         }
-        if is_correct:
+        if is_correct and exercise.exercise_id in lesson_exercise_ids:
             passed_exercise_ids.add(exercise.exercise_id)
 
         total = len(lesson_exercise_ids)

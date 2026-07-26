@@ -7135,6 +7135,17 @@
           "attempt": {
             "$ref": "#/components/schemas/AttemptResponse"
           },
+          "explanation": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Explanation"
+          },
           "updated_mastery": {
             "items": {
               "$ref": "#/components/schemas/SkillMasteryResponse"
@@ -7156,7 +7167,8 @@
         "required": [
           "attempt",
           "updated_mastery",
-          "updated_progress"
+          "updated_progress",
+          "explanation"
         ],
         "title": "SubmitAnswerResponse",
         "type": "object"

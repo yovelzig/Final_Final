@@ -96,6 +96,11 @@ class InvalidGradingRequestError(StockResearchError):
     """The submitted answer or exercise configuration cannot be graded as given."""
 
 
+class InvalidAttemptStateError(StockResearchError):
+    """An exercise attempt is not in a state that permits the requested operation
+    (for example, submitting an answer for an attempt that is not STARTED)."""
+
+
 class InactiveLearnerError(StockResearchError):
     """An adaptive-learning operation was requested for an inactive learner."""
 

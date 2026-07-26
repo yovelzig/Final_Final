@@ -90,10 +90,12 @@ export function useSubmitAnswer(attemptId: string) {
   return useMutation({
     mutationFn: (body: SubmitAnswerRequest) =>
       apiClient.post<SubmitAnswerResponse>(`/api/v1/attempts/${attemptId}/answers`, body),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: queryKeys.learner.dashboard() });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.learner.mastery() });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.learner.progress() });
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.learner.dashboard() }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.learner.mastery() }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.learner.progress() }),
+      ]);
     },
   });
 }

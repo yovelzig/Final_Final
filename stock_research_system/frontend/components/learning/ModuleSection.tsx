@@ -33,6 +33,8 @@ export function ModuleSection({ module }: { module: LearningModuleResponse }) {
         <div className="mt-3">
           <ErrorState error={lessonsQuery.error} onRetry={() => void lessonsQuery.refetch()} />
         </div>
+      ) : lessonsQuery.data.length === 0 ? (
+        <p className="mt-3 text-sm text-muted">No lessons are available in this module yet.</p>
       ) : (
         <ol className="mt-3 flex flex-col gap-2">
           {lessonsQuery.data
