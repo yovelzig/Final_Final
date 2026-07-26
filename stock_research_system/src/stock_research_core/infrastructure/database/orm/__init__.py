@@ -108,6 +108,11 @@ from stock_research_core.infrastructure.database.orm.skill_review_schedule impor
 from stock_research_core.infrastructure.database.orm.tracked_security import TrackedSecurityORM
 from stock_research_core.infrastructure.database.orm.user_progress import UserProgressORM
 from stock_research_core.infrastructure.database.orm.virtual_portfolio import VirtualPortfolioORM
+from stock_research_core.infrastructure.database.orm.research_request import ResearchRequestORM
+from stock_research_core.infrastructure.database.orm.research_run import ResearchRunORM
+from stock_research_core.infrastructure.database.orm.evidence_item import EvidenceItemORM
+from stock_research_core.infrastructure.database.orm.research_claim import ResearchClaimORM
+from stock_research_core.infrastructure.database.orm.claim_evidence_link import ClaimEvidenceLinkORM
 
 __all__ = [
     "AdaptiveDecisionORM",
@@ -167,4 +172,9 @@ __all__ = [
     "TrackedSecurityORM",
     "UserProgressORM",
     "VirtualPortfolioORM",
+    "ResearchRequestORM",
+    "ResearchRunORM",
+    "EvidenceItemORM",
+    "ResearchClaimORM",
+    "ClaimEvidenceLinkORM",
 ]
