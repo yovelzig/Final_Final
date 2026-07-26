@@ -399,3 +399,19 @@ class ObjectStorageAccessDeniedError(ObjectStorageError):
 
 class ObjectStoragePrefixNotAllowedError(ObjectStorageError):
     """The requested key does not fall inside any configured allowed prefix."""
+
+
+class SeedManifestValidationError(StockResearchError):
+    """A seed-knowledge manifest (or one of its documents' front matter)
+    failed structural, uniqueness, or path-safety validation."""
+
+
+class SeedManifestDocumentNotFoundError(StockResearchError):
+    """Single-document ingestion mode was requested for a document code
+    that has no matching entry in the manifest."""
+
+
+class SeedDocumentIntegrityError(StockResearchError):
+    """A seed document's canonical bytes did not match the hash the caller
+    expected - the manifest's `content_hash`, or the hash of what was
+    just uploaded/downloaded to/from object storage."""
