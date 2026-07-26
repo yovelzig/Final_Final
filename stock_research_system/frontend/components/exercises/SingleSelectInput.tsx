@@ -1,9 +1,18 @@
+import { useId } from "react";
+
 import type { ExerciseInputProps } from "@/components/exercises/types";
 
 /** Used for SINGLE_CHOICE, TRUE_FALSE, and SCENARIO_DECISION - all
- * three are a single-select radio group over the exercise's options. */
+ * three are a single-select radio group over the exercise's options.
+ *
+ * The radio `name` is derived from `useId()` so that multiple exercises
+ * mounted on the same lesson page never share one browser-level radio
+ * group - without this, selecting an option in one exercise would clear
+ * the selection in every other exercise using the same input type. */
 export function SingleSelectInput({ options, draft, onChange, disabled }: ExerciseInputProps) {
   const selected = draft.selectedOptionIds[0];
+  const groupId = useId();
+  const groupName = `single-select-answer-${groupId}`;
 
   return (
     <fieldset className="flex flex-col gap-2">
@@ -17,7 +26,7 @@ export function SingleSelectInput({ options, draft, onChange, disabled }: Exerci
         >
           <input
             type="radio"
-            name="single-select-answer"
+            name={groupName}
             value={option.option_id}
             checked={selected === option.option_id}
             disabled={disabled}

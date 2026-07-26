@@ -50,6 +50,8 @@ from stock_research_core.infrastructure.database.unit_of_work import SqlAlchemyU
 
 _NAMESPACE = uuid.UUID("f1a4a1e0-2222-4000-8000-000000000000")
 
+_TARGET_PATH_CODE = "investing-foundations"
+
 _DIFFICULTY_SCORES: dict[DifficultyLevel, float] = {
     DifficultyLevel.BEGINNER: 0.10,
     DifficultyLevel.EASY: 0.30,
@@ -102,6 +104,7 @@ async def seed() -> None:
 
         async with uow:
             paths = await uow.curriculum.list_paths(published_only=False)
+            paths = [path for path in paths if path.code == _TARGET_PATH_CODE]
             exercises: list[Exercise] = []
             for path in paths:
                 for module in await uow.curriculum.list_modules(path.path_id):

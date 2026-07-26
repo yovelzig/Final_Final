@@ -14,7 +14,15 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from stock_research_core.application.exceptions import InvalidGradingRequestError, PersistenceError
+from stock_research_core.application.exceptions import (
+    ExerciseNotFoundError,
+    InvalidAttemptStateError,
+    InvalidGradingRequestError,
+    LearningModuleNotFoundError,
+    LearningPathNotFoundError,
+    LessonNotFoundError,
+    PersistenceError,
+)
 from stock_research_core.application.learning import grading as grading_module
 from stock_research_core.application.learning import mastery as mastery_module
 from stock_research_core.application.learning import service as service_module
@@ -400,13 +408,23 @@ class FakeCurriculumRepository:
             values = [p for p in values if p.published]
         return sorted(values, key=lambda p: p.position)
 
+    async def get_path(self, path_id: UUID) -> LearningPath | None:
+        return self.paths.get(path_id)
+
     async def upsert_module(self, module: LearningModule) -> LearningModule:
         self.modules[module.module_id] = module
         return module
 
-    async def list_modules(self, path_id: UUID) -> list[LearningModule]:
+    async def list_modules(
+        self, path_id: UUID, *, published_only: bool = False
+    ) -> list[LearningModule]:
         values = [m for m in self.modules.values() if m.path_id == path_id]
+        if published_only:
+            values = [m for m in values if m.published]
         return sorted(values, key=lambda m: m.position)
+
+    async def get_module(self, module_id: UUID) -> LearningModule | None:
+        return self.modules.get(module_id)
 
     async def upsert_lesson(self, lesson: Lesson) -> Lesson:
         self.lessons[lesson.lesson_id] = lesson
@@ -415,8 +433,12 @@ class FakeCurriculumRepository:
     async def get_lesson(self, lesson_id: UUID) -> Lesson | None:
         return self.lessons.get(lesson_id)
 
-    async def list_lessons(self, module_id: UUID) -> list[Lesson]:
+    async def list_lessons(
+        self, module_id: UUID, *, published_only: bool = False
+    ) -> list[Lesson]:
         values = [lesson for lesson in self.lessons.values() if lesson.module_id == module_id]
+        if published_only:
+            values = [lesson for lesson in values if lesson.status == LessonStatus.PUBLISHED]
         return sorted(values, key=lambda lesson: lesson.position)
 
     async def upsert_exercise(self, exercise: Exercise) -> Exercise:
@@ -426,8 +448,12 @@ class FakeCurriculumRepository:
     async def get_exercise(self, exercise_id: UUID) -> Exercise | None:
         return self.exercises.get(exercise_id)
 
-    async def list_exercises(self, lesson_id: UUID) -> list[Exercise]:
+    async def list_exercises(
+        self, lesson_id: UUID, *, active_only: bool = False
+    ) -> list[Exercise]:
         values = [ex for ex in self.exercises.values() if ex.lesson_id == lesson_id]
+        if active_only:
+            values = [ex for ex in values if ex.active]
         return sorted(values, key=lambda ex: ex.position)
 
     async def upsert_options(self, options: list[ExerciseOption]) -> int:
@@ -453,7 +479,18 @@ class FakeAttemptRepository:
     async def get_attempt(self, attempt_id: UUID) -> ExerciseAttempt | None:
         return self.attempts.get(attempt_id)
 
+    async def get_attempt_for_update(self, attempt_id: UUID) -> ExerciseAttempt | None:
+        # No real row locking here: these fakes are single-threaded and used
+        # to test business logic, not database concurrency. The concurrent
+        # duplicate-submission scenario is covered by a real-database
+        # integration test (two genuinely separate sessions/transactions).
+        return self.attempts.get(attempt_id)
+
     async def save_answer(self, answer: ExerciseAnswer) -> ExerciseAnswer:
+        if any(existing.attempt_id == answer.attempt_id for existing in self.answers.values()):
+            raise InvalidAttemptStateError(
+                f"Attempt '{answer.attempt_id}' already has an answer recorded."
+            )
         self.answers[answer.answer_id] = answer
         return answer
 
@@ -603,8 +640,30 @@ async def _seed_single_choice_lesson(
     )
     await factory.curriculum.upsert_skill(skill)
 
+    path = LearningPath(
+        code="investing-foundations",
+        title="Investing Foundations",
+        description="desc",
+        difficulty=DifficultyLevel.BEGINNER,
+        position=0,
+        estimated_minutes=120,
+        published=True,
+    )
+    await factory.curriculum.upsert_path(path)
+
+    module = LearningModule(
+        path_id=path.path_id,
+        code="money-and-inflation",
+        title="Money and Inflation",
+        description="desc",
+        position=0,
+        estimated_minutes=30,
+        published=True,
+    )
+    await factory.curriculum.upsert_module(module)
+
     lesson = Lesson(
-        module_id=uuid4(),
+        module_id=module.module_id,
         code="what-money-is-for",
         title="What Money Is For",
         summary="summary",
@@ -693,6 +752,7 @@ async def test_submission_persists_answer_and_attempt_atomically() -> None:
     assert result.attempt.is_correct is True
     assert result.answer.attempt_id == attempt.attempt_id
     assert factory.attempts.attempts[attempt.attempt_id].status == AttemptStatus.GRADED
+    assert result.explanation == exercise.explanation
 
 
 async def test_submission_updates_mastery() -> None:
@@ -726,6 +786,84 @@ async def test_submission_updates_progress() -> None:
     assert result.updated_progress.completion_percentage == pytest.approx(100.0)
 
 
+async def test_inactive_exercise_does_not_block_lesson_completion() -> None:
+    factory = FakeUnitOfWorkFactory()
+    service = LearningService(unit_of_work_factory=factory)
+    skill, lesson, exercise, correct_option, _ = await _seed_single_choice_lesson(factory)
+
+    inactive_exercise = Exercise(
+        lesson_id=lesson.lesson_id,
+        exercise_type=ExerciseType.SINGLE_CHOICE,
+        prompt="inactive prompt",
+        explanation="inactive explanation",
+        difficulty=DifficultyLevel.BEGINNER,
+        position=1,
+        skill_ids=[skill.skill_id],
+        maximum_score=1.0,
+        passing_score=1.0,
+        active=False,
+    )
+    await factory.curriculum.upsert_exercise(inactive_exercise)
+
+    learner_id = uuid4()
+    attempt = await service.start_exercise_attempt(learner_id=learner_id, exercise_id=exercise.exercise_id)
+    answer = ExerciseAnswer(attempt_id=attempt.attempt_id, selected_option_ids=[correct_option.option_id])
+
+    result = await service.submit_answer(attempt_id=attempt.attempt_id, answer=answer)
+
+    assert result.updated_progress is not None
+    assert result.updated_progress.completion_percentage == pytest.approx(100.0)
+    assert result.updated_progress.status == ProgressStatus.COMPLETED
+
+
+async def test_update_lesson_progress_helper_never_exceeds_100_percent() -> None:
+    """Direct regression test on the `_update_lesson_progress` helper itself:
+    an old correct attempt for an exercise that was later deactivated must
+    never inflate the numerator past the active-exercise denominator."""
+    factory = FakeUnitOfWorkFactory()
+    service = LearningService(unit_of_work_factory=factory)
+    skill, lesson, exercise_a, correct_option, _ = await _seed_single_choice_lesson(factory)
+
+    exercise_b = Exercise(
+        lesson_id=lesson.lesson_id,
+        exercise_type=ExerciseType.SINGLE_CHOICE,
+        prompt="prompt b",
+        explanation="explanation b",
+        difficulty=DifficultyLevel.BEGINNER,
+        position=1,
+        skill_ids=[skill.skill_id],
+        maximum_score=1.0,
+        passing_score=1.0,
+    )
+    await factory.curriculum.upsert_exercise(exercise_b)
+    option_b = ExerciseOption(
+        exercise_id=exercise_b.exercise_id, option_key="a", content="Correct", position=0, is_correct=True
+    )
+    await factory.curriculum.upsert_options([option_b])
+
+    learner_id = uuid4()
+    attempt_b = await service.start_exercise_attempt(learner_id=learner_id, exercise_id=exercise_b.exercise_id)
+    answer_b = ExerciseAnswer(attempt_id=attempt_b.attempt_id, selected_option_ids=[option_b.option_id])
+    await service.submit_answer(attempt_id=attempt_b.attempt_id, answer=answer_b)
+
+    # exercise_a is deactivated after an earlier (already-counted) attempt on it.
+    deactivated_exercise_a = exercise_a.model_copy(update={"active": False})
+    await factory.curriculum.upsert_exercise(deactivated_exercise_a)
+
+    uow = factory()
+    updated = await LearningService._update_lesson_progress(
+        uow,
+        learner_id=learner_id,
+        exercise=deactivated_exercise_a,
+        is_correct=True,
+        score=1.0,
+        now=NOW,
+    )
+
+    assert updated.completion_percentage <= 100.0
+    assert updated.completion_percentage == pytest.approx(100.0)
+
+
 async def test_ungraded_exercise_type_does_not_update_mastery_or_progress() -> None:
     factory = FakeUnitOfWorkFactory()
     service = LearningService(unit_of_work_factory=factory)
@@ -754,6 +892,7 @@ async def test_ungraded_exercise_type_does_not_update_mastery_or_progress() -> N
     assert result.attempt.status == AttemptStatus.SUBMITTED
     assert result.updated_mastery == []
     assert result.updated_progress is None
+    assert result.explanation is None
 
 
 async def test_failure_rolls_back_the_complete_transaction() -> None:
@@ -771,6 +910,363 @@ async def test_failure_rolls_back_the_complete_transaction() -> None:
     submission_uow = factory.instances[-1]
     assert submission_uow.committed is False
     assert submission_uow.rolled_back is True
+
+
+async def test_resubmitting_a_graded_attempt_raises_invalid_attempt_state() -> None:
+    factory = FakeUnitOfWorkFactory()
+    service = LearningService(unit_of_work_factory=factory)
+    skill, _, exercise, correct_option, _ = await _seed_single_choice_lesson(factory)
+    learner_id = uuid4()
+    attempt = await service.start_exercise_attempt(learner_id=learner_id, exercise_id=exercise.exercise_id)
+
+    answer = ExerciseAnswer(attempt_id=attempt.attempt_id, selected_option_ids=[correct_option.option_id])
+    first_result = await service.submit_answer(attempt_id=attempt.attempt_id, answer=answer)
+    assert first_result.attempt.status == AttemptStatus.GRADED
+
+    with pytest.raises(InvalidAttemptStateError):
+        await service.submit_answer(attempt_id=attempt.attempt_id, answer=answer)
+
+    # Mastery/progress must reflect exactly one graded submission, not two.
+    assert factory.mastery.mastery[(learner_id, skill.skill_id)].total_attempts == 1
+    assert len(factory.attempts.answers) == 1
+
+
+@pytest.mark.parametrize(
+    "terminal_status,extra_fields",
+    [
+        (AttemptStatus.SUBMITTED, {"submitted_at": NOW}),
+        (AttemptStatus.GRADED, {"submitted_at": NOW, "graded_at": NOW, "score": 1.0, "is_correct": True}),
+        (AttemptStatus.ABANDONED, {}),
+    ],
+)
+async def test_submit_answer_rejects_every_non_started_status(
+    terminal_status: AttemptStatus, extra_fields: dict
+) -> None:
+    factory = FakeUnitOfWorkFactory()
+    service = LearningService(unit_of_work_factory=factory)
+    _, _, exercise, correct_option, _ = await _seed_single_choice_lesson(factory)
+    learner_id = uuid4()
+    started_attempt = await service.start_exercise_attempt(
+        learner_id=learner_id, exercise_id=exercise.exercise_id
+    )
+    terminal_attempt = started_attempt.model_copy(
+        update={"status": terminal_status, **extra_fields}
+    )
+    factory.attempts.attempts[terminal_attempt.attempt_id] = terminal_attempt
+
+    answer = ExerciseAnswer(
+        attempt_id=terminal_attempt.attempt_id, selected_option_ids=[correct_option.option_id]
+    )
+    with pytest.raises(InvalidAttemptStateError):
+        await service.submit_answer(attempt_id=terminal_attempt.attempt_id, answer=answer)
+
+
+async def test_submit_answer_accepts_a_started_attempt() -> None:
+    factory = FakeUnitOfWorkFactory()
+    service = LearningService(unit_of_work_factory=factory)
+    _, _, exercise, correct_option, _ = await _seed_single_choice_lesson(factory)
+    learner_id = uuid4()
+    attempt = await service.start_exercise_attempt(learner_id=learner_id, exercise_id=exercise.exercise_id)
+    assert attempt.status == AttemptStatus.STARTED
+
+    answer = ExerciseAnswer(attempt_id=attempt.attempt_id, selected_option_ids=[correct_option.option_id])
+    result = await service.submit_answer(attempt_id=attempt.attempt_id, answer=answer)
+
+    assert result.attempt.status == AttemptStatus.GRADED
+
+
+# ---------------------------------------------------------------------------
+# Learner-facing publication-chain visibility tests
+# ---------------------------------------------------------------------------
+
+
+async def _seed_hierarchy(
+    factory: FakeUnitOfWorkFactory,
+    *,
+    path_published: bool = True,
+    module_published: bool = True,
+    lesson_status: LessonStatus = LessonStatus.PUBLISHED,
+    exercise_active: bool = True,
+) -> tuple[UUID, UUID, UUID, UUID]:
+    skill = Skill(
+        code="MONEY_BASICS", name="Money Basics", description="d",
+        category=FinancialSkillCategory.MONEY_BASICS, difficulty=DifficultyLevel.BEGINNER,
+    )
+    await factory.curriculum.upsert_skill(skill)
+    path = LearningPath(
+        code="path", title="Path", description="d", difficulty=DifficultyLevel.BEGINNER,
+        position=0, estimated_minutes=10, published=path_published,
+    )
+    await factory.curriculum.upsert_path(path)
+    module = LearningModule(
+        path_id=path.path_id, code="module", title="Module", description="d",
+        position=0, estimated_minutes=10, published=module_published,
+    )
+    await factory.curriculum.upsert_module(module)
+    lesson = Lesson(
+        module_id=module.module_id, code="lesson", title="Lesson", summary="s",
+        content_markdown="# c", difficulty=DifficultyLevel.BEGINNER, status=lesson_status,
+        position=0, estimated_minutes=10, primary_skill_id=skill.skill_id,
+    )
+    await factory.curriculum.upsert_lesson(lesson)
+    exercise = Exercise(
+        lesson_id=lesson.lesson_id, exercise_type=ExerciseType.SINGLE_CHOICE, prompt="p",
+        explanation="e", difficulty=DifficultyLevel.BEGINNER, position=0,
+        skill_ids=[skill.skill_id], maximum_score=1.0, passing_score=1.0, active=exercise_active,
+    )
+    await factory.curriculum.upsert_exercise(exercise)
+    return path.path_id, module.module_id, lesson.lesson_id, exercise.exercise_id
+
+
+async def test_fully_published_hierarchy_is_visible_at_every_level() -> None:
+    factory = FakeUnitOfWorkFactory()
+    service = LearningService(unit_of_work_factory=factory)
+    path_id, module_id, lesson_id, exercise_id = await _seed_hierarchy(factory)
+
+    path = await service.get_visible_path(path_id)
+    assert path.path_id == path_id
+    assert [m.module_id for m in await service.list_visible_modules(path_id)] == [module_id]
+    module = await service.get_visible_module(module_id)
+    assert module.module_id == module_id
+    assert [lesson.lesson_id for lesson in await service.list_visible_lessons(module_id)] == [lesson_id]
+    lesson = await service.get_visible_lesson(lesson_id)
+    assert lesson.lesson_id == lesson_id
+    exercise, _options = await service.get_visible_exercise(exercise_id)
+    assert exercise.exercise_id == exercise_id
+
+
+async def test_unpublished_path_is_hidden_directly_and_has_no_reachable_descendants() -> None:
+    factory = FakeUnitOfWorkFactory()
+    service = LearningService(unit_of_work_factory=factory)
+    path_id, module_id, lesson_id, exercise_id = await _seed_hierarchy(factory, path_published=False)
+
+    with pytest.raises(LearningPathNotFoundError):
+        await service.get_visible_path(path_id)
+    with pytest.raises(LearningPathNotFoundError):
+        await service.list_visible_modules(path_id)
+    with pytest.raises(LearningModuleNotFoundError):
+        await service.get_visible_module(module_id)
+    with pytest.raises(LessonNotFoundError):
+        await service.get_visible_lesson(lesson_id)
+    with pytest.raises(ExerciseNotFoundError):
+        await service.get_visible_exercise(exercise_id)
+
+
+async def test_published_module_under_unpublished_path_is_hidden() -> None:
+    factory = FakeUnitOfWorkFactory()
+    service = LearningService(unit_of_work_factory=factory)
+    path_id, module_id, _lesson_id, _exercise_id = await _seed_hierarchy(
+        factory, path_published=False, module_published=True
+    )
+
+    with pytest.raises(LearningPathNotFoundError):
+        await service.list_visible_modules(path_id)
+    with pytest.raises(LearningModuleNotFoundError):
+        await service.get_visible_module(module_id)
+
+
+async def test_unpublished_module_under_published_path_is_excluded_and_hidden() -> None:
+    factory = FakeUnitOfWorkFactory()
+    service = LearningService(unit_of_work_factory=factory)
+    path_id, module_id, lesson_id, exercise_id = await _seed_hierarchy(
+        factory, path_published=True, module_published=False
+    )
+
+    assert await service.list_visible_modules(path_id) == []
+    with pytest.raises(LearningModuleNotFoundError):
+        await service.get_visible_module(module_id)
+    with pytest.raises(LessonNotFoundError):
+        await service.get_visible_lesson(lesson_id)
+    with pytest.raises(ExerciseNotFoundError):
+        await service.get_visible_exercise(exercise_id)
+
+
+async def test_published_lesson_under_unpublished_module_is_hidden() -> None:
+    factory = FakeUnitOfWorkFactory()
+    service = LearningService(unit_of_work_factory=factory)
+    _path_id, module_id, lesson_id, exercise_id = await _seed_hierarchy(
+        factory, module_published=False, lesson_status=LessonStatus.PUBLISHED
+    )
+
+    with pytest.raises(LearningModuleNotFoundError):
+        await service.list_visible_lessons(module_id)
+    with pytest.raises(LessonNotFoundError):
+        await service.get_visible_lesson(lesson_id)
+    with pytest.raises(ExerciseNotFoundError):
+        await service.get_visible_exercise(exercise_id)
+
+
+async def test_unpublished_lesson_under_published_module_is_excluded_and_hidden() -> None:
+    factory = FakeUnitOfWorkFactory()
+    service = LearningService(unit_of_work_factory=factory)
+    _path_id, module_id, lesson_id, exercise_id = await _seed_hierarchy(
+        factory, lesson_status=LessonStatus.DRAFT
+    )
+
+    assert await service.list_visible_lessons(module_id) == []
+    with pytest.raises(LessonNotFoundError):
+        await service.get_visible_lesson(lesson_id)
+    with pytest.raises(ExerciseNotFoundError):
+        await service.get_visible_exercise(exercise_id)
+
+
+async def test_inactive_exercise_is_excluded_and_hidden() -> None:
+    factory = FakeUnitOfWorkFactory()
+    service = LearningService(unit_of_work_factory=factory)
+    _path_id, _module_id, lesson_id, exercise_id = await _seed_hierarchy(factory, exercise_active=False)
+
+    result = await service.get_lesson_with_exercises(lesson_id)
+    assert result.exercises == []
+    with pytest.raises(ExerciseNotFoundError):
+        await service.get_visible_exercise(exercise_id)
+
+
+async def test_active_exercise_under_hidden_lesson_is_excluded_and_hidden() -> None:
+    factory = FakeUnitOfWorkFactory()
+    service = LearningService(unit_of_work_factory=factory)
+    _path_id, _module_id, lesson_id, exercise_id = await _seed_hierarchy(
+        factory, lesson_status=LessonStatus.DRAFT, exercise_active=True
+    )
+
+    with pytest.raises(LessonNotFoundError):
+        await service.get_lesson_with_exercises(lesson_id)
+    with pytest.raises(ExerciseNotFoundError):
+        await service.get_visible_exercise(exercise_id)
+
+
+async def test_admin_repository_access_is_unaffected_when_filters_are_omitted() -> None:
+    """Proves the repository's default (`published_only`/`active_only` both
+    default `False`) still returns unpublished/inactive content - the same
+    behavior `api/routers/admin.py` relies on for content authoring."""
+    factory = FakeUnitOfWorkFactory()
+    _path_id, module_id, lesson_id, _exercise_id = await _seed_hierarchy(
+        factory, module_published=False, lesson_status=LessonStatus.DRAFT, exercise_active=False
+    )
+
+    unfiltered_lessons = await factory.curriculum.list_lessons(module_id)
+    assert [lesson.lesson_id for lesson in unfiltered_lessons] == [lesson_id]
+    unfiltered_exercises = await factory.curriculum.list_exercises(lesson_id)
+    assert len(unfiltered_exercises) == 1
+
+
+# ---------------------------------------------------------------------------
+# Single-Unit-of-Work proof: one learner request must open exactly one UoW,
+# not one per ancestor-chain level (private `_get_visible_*` helpers take an
+# existing `uow` and never open their own).
+# ---------------------------------------------------------------------------
+
+
+async def test_get_visible_exercise_opens_exactly_one_unit_of_work() -> None:
+    factory = FakeUnitOfWorkFactory()
+    service = LearningService(unit_of_work_factory=factory)
+    _path_id, _module_id, _lesson_id, exercise_id = await _seed_hierarchy(factory)
+
+    await service.get_visible_exercise(exercise_id)
+
+    assert len(factory.instances) == 1
+
+
+async def test_list_visible_lessons_opens_exactly_one_unit_of_work() -> None:
+    factory = FakeUnitOfWorkFactory()
+    service = LearningService(unit_of_work_factory=factory)
+    _path_id, module_id, _lesson_id, _exercise_id = await _seed_hierarchy(factory)
+
+    await service.list_visible_lessons(module_id)
+
+    assert len(factory.instances) == 1
+
+
+async def test_get_lesson_with_exercises_opens_exactly_one_unit_of_work() -> None:
+    factory = FakeUnitOfWorkFactory()
+    service = LearningService(unit_of_work_factory=factory)
+    _path_id, _module_id, lesson_id, _exercise_id = await _seed_hierarchy(factory)
+
+    await service.get_lesson_with_exercises(lesson_id)
+
+    assert len(factory.instances) == 1
+
+
+async def test_start_exercise_attempt_opens_exactly_one_unit_of_work() -> None:
+    factory = FakeUnitOfWorkFactory()
+    service = LearningService(unit_of_work_factory=factory)
+    _path_id, _module_id, _lesson_id, exercise_id = await _seed_hierarchy(factory)
+
+    await service.start_exercise_attempt(learner_id=uuid4(), exercise_id=exercise_id)
+
+    assert len(factory.instances) == 1
+
+
+# ---------------------------------------------------------------------------
+# Concern 1: hidden/inactive exercises must not be attemptable.
+# ---------------------------------------------------------------------------
+
+
+async def test_start_exercise_attempt_rejects_inactive_exercise() -> None:
+    factory = FakeUnitOfWorkFactory()
+    service = LearningService(unit_of_work_factory=factory)
+    _path_id, _module_id, _lesson_id, exercise_id = await _seed_hierarchy(
+        factory, exercise_active=False
+    )
+    learner_id = uuid4()
+
+    with pytest.raises(ExerciseNotFoundError):
+        await service.start_exercise_attempt(learner_id=learner_id, exercise_id=exercise_id)
+
+    assert await factory.attempts.list_attempts(learner_id, exercise_id) == []
+
+
+async def test_start_exercise_attempt_rejects_exercise_under_unpublished_lesson() -> None:
+    factory = FakeUnitOfWorkFactory()
+    service = LearningService(unit_of_work_factory=factory)
+    _path_id, _module_id, _lesson_id, exercise_id = await _seed_hierarchy(
+        factory, lesson_status=LessonStatus.DRAFT
+    )
+    learner_id = uuid4()
+
+    with pytest.raises(ExerciseNotFoundError):
+        await service.start_exercise_attempt(learner_id=learner_id, exercise_id=exercise_id)
+
+    assert await factory.attempts.list_attempts(learner_id, exercise_id) == []
+
+
+async def test_start_exercise_attempt_rejects_exercise_under_unpublished_module() -> None:
+    factory = FakeUnitOfWorkFactory()
+    service = LearningService(unit_of_work_factory=factory)
+    _path_id, _module_id, _lesson_id, exercise_id = await _seed_hierarchy(
+        factory, module_published=False
+    )
+    learner_id = uuid4()
+
+    with pytest.raises(ExerciseNotFoundError):
+        await service.start_exercise_attempt(learner_id=learner_id, exercise_id=exercise_id)
+
+    assert await factory.attempts.list_attempts(learner_id, exercise_id) == []
+
+
+async def test_start_exercise_attempt_rejects_exercise_under_unpublished_path() -> None:
+    factory = FakeUnitOfWorkFactory()
+    service = LearningService(unit_of_work_factory=factory)
+    _path_id, _module_id, _lesson_id, exercise_id = await _seed_hierarchy(
+        factory, path_published=False
+    )
+    learner_id = uuid4()
+
+    with pytest.raises(ExerciseNotFoundError):
+        await service.start_exercise_attempt(learner_id=learner_id, exercise_id=exercise_id)
+
+    assert await factory.attempts.list_attempts(learner_id, exercise_id) == []
+
+
+async def test_start_exercise_attempt_accepts_a_fully_visible_exercise() -> None:
+    factory = FakeUnitOfWorkFactory()
+    service = LearningService(unit_of_work_factory=factory)
+    _path_id, _module_id, _lesson_id, exercise_id = await _seed_hierarchy(factory)
+    learner_id = uuid4()
+
+    attempt = await service.start_exercise_attempt(learner_id=learner_id, exercise_id=exercise_id)
+
+    assert attempt.exercise_id == exercise_id
+    assert len(await factory.attempts.list_attempts(learner_id, exercise_id)) == 1
 
 
 async def test_application_service_uses_protocols_via_fakes() -> None:

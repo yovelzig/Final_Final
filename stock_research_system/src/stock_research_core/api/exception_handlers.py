@@ -41,6 +41,7 @@ from stock_research_core.application.exceptions import (
     IntegrationAuthenticationFailedError,
     IntegrationRequestConflictError,
     InvalidAccessTokenError,
+    InvalidAttemptStateError,
     InvalidDecisionStateError,
     InvalidGradingRequestError,
     InvalidJobParametersError,
@@ -151,6 +152,7 @@ _EXCEPTION_STATUS_MAP: dict[type[Exception], tuple[int, str]] = {
     QualityEvaluationSuiteNotApprovedError: (409, "SUITE_NOT_APPROVED"),
     QualityEvaluationBaselineNotComparableError: (409, "BASELINE_NOT_COMPARABLE"),
     # Conflict / invalid state -> 409
+    InvalidAttemptStateError: (409, "INVALID_ATTEMPT_STATE"),
     InvalidDecisionStateError: (409, "INVALID_STATE"),
     InvalidScenarioStateError: (409, "INVALID_STATE"),
     InvalidPortfolioStateError: (409, "INVALID_STATE"),

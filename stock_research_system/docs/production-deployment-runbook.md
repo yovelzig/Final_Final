@@ -160,6 +160,7 @@ Run this only against a deliberately targeted database (a fresh restore target o
 | Stage | What changed | Smoke test |
 |---|---|---|
 | A2 | Worker health/image targets | `dc exec finquest-worker-market python -m stock_research_core.cli.worker_status` (repeat for `-portfolio`, `-default`); `dc exec finquest-worker-knowledge python -m stock_research_core.cli.worker_status --require-embedding` for the knowledge worker specifically (confirms it, and only it, checks embedding-provider readiness) |
+| B | Curriculum + adaptive profiles | Run both seed commands in order; traverse the seeded hierarchy — `GET /api/v1/learning-paths` → `GET /api/v1/learning-paths/{path_id}/modules` → `GET /api/v1/modules/{module_id}/lessons` → `GET /api/v1/lessons/{lesson_id}/exercises` — confirming the deterministic seeded "Investing Foundations" subtree totals 1 path / 4 modules / 8 lessons / 24 exercises (not that all global tables contain only those rows); complete one lesson's exercises end-to-end in the browser and confirm "Continue learning" reflects progress |
 | 3 | Knowledge Base corpus | Ask the tutor a question whose answer requires the newly ingested content; confirm citations reference the new documents |
 | 4 | Ollama tutor | Ask a real tutor question; confirm the response is grounded, cited, and did not silently fall back to the extractive tutor (check `tutor_model_provider` in the response metadata / logs) |
 | 5 | Sufficiency gate | Ask a question with no supporting knowledge; confirm a clean abstention, not a hallucinated answer |
@@ -212,6 +213,20 @@ Phase A2 corrects five services' build targets and two files' health-check/safet
 - **Recreate only the five affected services** (`dc up -d --no-deps <service>` per §3 EC2 step 8) — never `finquest-web`, `stock-db`, or `redis`.
 - **Verify all worker health states** after recreation (`dc ps` — all `healthy`), then confirm the knowledge worker specifically requires embeddings and the other three don't (see the A2 row in §6's smoke-test table) — this is the behavioral difference this phase introduces and the one worth checking explicitly, not just "container is up."
 - **Rollback**: standard Git-revert path (§4) — revert the branch's commits, rebuild the same five services (now back on their prior `ai` targets and prior healthcheck commands from the reverted Dockerfile/Compose files), recreate them. No migration downgrade step applies (none ran).
+
+---
+
+## 7a. Phase B — Curriculum Seed Deployment Notes
+
+- **Exact ordered production seed commands** (curriculum must run before adaptive profiles):
+  ```bash
+  dc exec finquest-api python scripts/seed_learning_curriculum.py
+  dc exec finquest-api python scripts/seed_adaptive_learning_profiles.py
+  ```
+- **Adaptive-profile scoping:** as of this phase, `scripts/seed_adaptive_learning_profiles.py` filters to the `investing-foundations` path by natural code before building profiles — it will not create or update a profile for any other path present in the production database, even if unrelated curriculum content exists.
+- **No Alembic migration** — Phase B makes no schema change; skip §3 EC2 step 6 entirely for this deployment.
+- **No database reset.**
+- **Rollback:** a code-only rollback is sufficient — seeded curriculum data may remain in place after reverting the code, since the schema is unchanged and old code can still read the same rows. A database backup (§5) is needed only if a real data rollback (not just a code rollback) is required.
 
 ---
 

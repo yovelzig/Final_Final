@@ -166,3 +166,7 @@ class SubmitAnswerResponse(ApiSchema):
     attempt: AttemptResponse
     updated_mastery: list[SkillMasteryResponse]
     updated_progress: ProgressResponse | None
+    explanation: str | None
+    """`Exercise.explanation`, populated only once grading is definitive;
+    `null` for an ungraded/pending exercise type. Never present on any
+    pre-submission `ExerciseResponse`."""

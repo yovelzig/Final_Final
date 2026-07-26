@@ -4327,6 +4327,8 @@ export interface components {
         /** SubmitAnswerResponse */
         SubmitAnswerResponse: {
             attempt: components["schemas"]["AttemptResponse"];
+            /** Explanation */
+            explanation: string | null;
             /** Updated Mastery */
             updated_mastery: components["schemas"]["SkillMasteryResponse"][];
             updated_progress: components["schemas"]["ProgressResponse"] | null;

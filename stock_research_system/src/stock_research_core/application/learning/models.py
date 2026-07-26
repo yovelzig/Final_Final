@@ -73,3 +73,7 @@ class LearningActivityResult(DomainModel):
     answer: ExerciseAnswer
     updated_mastery: list[SkillMastery] = Field(default_factory=list)
     updated_progress: UserProgress | None = None
+    explanation: str | None = None
+    """`Exercise.explanation`, populated only once grading is definitive
+    (`None` for an ungraded/pending exercise type such as TEXT_RESPONSE or
+    SCENARIO_DECISION)."""

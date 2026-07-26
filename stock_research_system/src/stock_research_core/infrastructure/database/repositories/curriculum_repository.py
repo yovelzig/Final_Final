@@ -16,6 +16,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from stock_research_core.domain.learning.enums import LessonStatus
 from stock_research_core.domain.learning.models import (
     Exercise,
     ExerciseOption,
@@ -187,12 +188,16 @@ class SqlAlchemyCurriculumRepository:
         assert row is not None
         return learning_module_orm_to_domain(row)
 
-    async def list_modules(self, path_id: UUID) -> list[LearningModule]:
+    async def list_modules(
+        self, path_id: UUID, *, published_only: bool = False
+    ) -> list[LearningModule]:
         statement = (
             select(LearningModuleORM)
             .where(LearningModuleORM.path_id == path_id)
             .order_by(LearningModuleORM.position.asc())
         )
+        if published_only:
+            statement = statement.where(LearningModuleORM.published.is_(True))
         result = await self._session.execute(statement)
         return [learning_module_orm_to_domain(row) for row in result.scalars().all()]
 
@@ -255,12 +260,16 @@ class SqlAlchemyCurriculumRepository:
             return None
         return lesson_orm_to_domain(row, await self._load_secondary_skills(lesson_id))
 
-    async def list_lessons(self, module_id: UUID) -> list[Lesson]:
+    async def list_lessons(
+        self, module_id: UUID, *, published_only: bool = False
+    ) -> list[Lesson]:
         statement = (
             select(LessonORM)
             .where(LessonORM.module_id == module_id)
             .order_by(LessonORM.position.asc())
         )
+        if published_only:
+            statement = statement.where(LessonORM.status == LessonStatus.PUBLISHED.value)
         result = await self._session.execute(statement)
         rows = result.scalars().all()
         return [
@@ -327,12 +336,16 @@ class SqlAlchemyCurriculumRepository:
             return None
         return exercise_orm_to_domain(row, await self._load_exercise_skills(exercise_id))
 
-    async def list_exercises(self, lesson_id: UUID) -> list[Exercise]:
+    async def list_exercises(
+        self, lesson_id: UUID, *, active_only: bool = False
+    ) -> list[Exercise]:
         statement = (
             select(ExerciseORM)
             .where(ExerciseORM.lesson_id == lesson_id)
             .order_by(ExerciseORM.position.asc())
         )
+        if active_only:
+            statement = statement.where(ExerciseORM.active.is_(True))
         result = await self._session.execute(statement)
         rows = result.scalars().all()
         return [

@@ -27,13 +27,7 @@ from stock_research_core.api.schemas.curriculum import (
     SubmitAnswerResponse,
 )
 from stock_research_core.api.schemas.learners import ProgressResponse, SkillMasteryResponse
-from stock_research_core.application.exceptions import (
-    ExerciseAttemptNotFoundError,
-    ExerciseNotFoundError,
-    LearningModuleNotFoundError,
-    LearningPathNotFoundError,
-    LessonNotFoundError,
-)
+from stock_research_core.application.exceptions import ExerciseAttemptNotFoundError
 from stock_research_core.application.learning.service import LearningService
 from stock_research_core.domain.learning.models import ExerciseAnswer
 
@@ -53,10 +47,7 @@ async def list_learning_paths(uow_factory: Annotated[object, Depends(get_uow_fac
 async def get_learning_path(
     path_id: UUID, uow_factory: Annotated[object, Depends(get_uow_factory)]
 ) -> LearningPathResponse:
-    async with uow_factory() as uow:
-        path = await uow.curriculum.get_path(path_id)
-    if path is None:
-        raise LearningPathNotFoundError(f"No learning path found with id '{path_id}'.")
+    path = await LearningService(uow_factory).get_visible_path(path_id)
     return LearningPathResponse.from_domain(path)
 
 
@@ -67,8 +58,7 @@ async def get_learning_path(
 async def list_modules(
     path_id: UUID, uow_factory: Annotated[object, Depends(get_uow_factory)]
 ) -> list[LearningModuleResponse]:
-    async with uow_factory() as uow:
-        modules = await uow.curriculum.list_modules(path_id)
+    modules = await LearningService(uow_factory).list_visible_modules(path_id)
     return [LearningModuleResponse.from_domain(module) for module in modules]
 
 
@@ -78,10 +68,7 @@ async def list_modules(
 async def get_module(
     module_id: UUID, uow_factory: Annotated[object, Depends(get_uow_factory)]
 ) -> LearningModuleResponse:
-    async with uow_factory() as uow:
-        module = await uow.curriculum.get_module(module_id)
-    if module is None:
-        raise LearningModuleNotFoundError(f"No learning module found with id '{module_id}'.")
+    module = await LearningService(uow_factory).get_visible_module(module_id)
     return LearningModuleResponse.from_domain(module)
 
 
@@ -91,8 +78,7 @@ async def get_module(
 async def list_lessons(
     module_id: UUID, uow_factory: Annotated[object, Depends(get_uow_factory)]
 ) -> list[LessonResponse]:
-    async with uow_factory() as uow:
-        lessons = await uow.curriculum.list_lessons(module_id)
+    lessons = await LearningService(uow_factory).list_visible_lessons(module_id)
     return [LessonResponse.from_domain(lesson) for lesson in lessons]
 
 
@@ -100,10 +86,7 @@ async def list_lessons(
 async def get_lesson(
     lesson_id: UUID, uow_factory: Annotated[object, Depends(get_uow_factory)]
 ) -> LessonResponse:
-    async with uow_factory() as uow:
-        lesson = await uow.curriculum.get_lesson(lesson_id)
-    if lesson is None:
-        raise LessonNotFoundError(f"No lesson found with id '{lesson_id}'.")
+    lesson = await LearningService(uow_factory).get_visible_lesson(lesson_id)
     return LessonResponse.from_domain(lesson)
 
 
@@ -129,11 +112,7 @@ async def list_lesson_exercises(
 async def get_exercise(
     exercise_id: UUID, uow_factory: Annotated[object, Depends(get_uow_factory)]
 ) -> ExerciseResponse:
-    async with uow_factory() as uow:
-        exercise = await uow.curriculum.get_exercise(exercise_id)
-        if exercise is None:
-            raise ExerciseNotFoundError(f"No exercise found with id '{exercise_id}'.")
-        options = await uow.curriculum.list_options(exercise_id)
+    exercise, options = await LearningService(uow_factory).get_visible_exercise(exercise_id)
     return ExerciseResponse.from_domain(exercise, options)
 
 
@@ -194,4 +173,5 @@ async def submit_answer(
         attempt=AttemptResponse.from_domain(result.attempt),
         updated_mastery=[SkillMasteryResponse.from_domain(m) for m in result.updated_mastery],
         updated_progress=ProgressResponse.from_domain(result.updated_progress) if result.updated_progress else None,
+        explanation=result.explanation,
     )
