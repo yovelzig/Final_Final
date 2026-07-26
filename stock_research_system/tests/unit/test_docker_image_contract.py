@@ -16,10 +16,30 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _DOCKERFILE = (_REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
 _PRODUCTION_COMPOSE = (_REPO_ROOT / "docker-compose.production.yml").read_text(encoding="utf-8")
+_DEV_COMPOSE = (_REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
 _BACKUP_SCRIPT_PATH = _REPO_ROOT / "scripts" / "backup_production_database.sh"
 _BACKUP_SCRIPT = _BACKUP_SCRIPT_PATH.read_text(encoding="utf-8")
 _RUNBOOK = (_REPO_ROOT / "docs" / "production-deployment-runbook.md").read_text(encoding="utf-8")
 _BASH = shutil.which("bash")
+
+# Phase F1b/C3 integration: the seven S3 object-storage settings, added
+# only to `finquest-api` (the only service that runs the operator
+# `cli.knowledge_base --ingest-manifest` command today).
+_S3_ENV_VAR_NAMES = (
+    "OBJECT_STORAGE_PROVIDER", "AWS_REGION", "S3_BUCKET_NAME", "S3_KNOWLEDGE_PREFIX",
+    "S3_EXTRACTED_TEXT_PREFIX", "S3_RESEARCH_ARTIFACT_PREFIX", "S3_FORCE_PATH_STYLE",
+)
+_NON_API_SERVICE_NAMES = (
+    "finquest-web", "finquest-worker-market", "finquest-worker-portfolio",
+    "finquest-worker-knowledge", "finquest-worker-default", "stock-db", "redis",
+)
+
+
+def _service_block_in(compose_text: str, service_name: str) -> str:
+    pattern = rf"(?m)^  {re.escape(service_name)}:\n(.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)"
+    match = re.search(pattern, compose_text, flags=re.DOTALL)
+    assert match is not None, f"service block for {service_name!r} not found"
+    return match.group(1)
 
 _WORKER_TARGET_CONTRACT = {
     "finquest-api": "ai",
@@ -77,6 +97,57 @@ class TestDockerfileCopiesScripts:
         base_stage, _, ai_stage = _DOCKERFILE.partition("FROM base AS ai")
         assert "COPY scripts ./scripts" in base_stage
         assert "COPY scripts ./scripts" not in ai_stage
+
+
+class TestDockerfileCopiesKnowledgeCorpus:
+    """Phase F1b/C3 integration: both `base` and `ai` images must contain the
+    version-controlled seed-knowledge corpus so `cli.knowledge_base
+    --ingest-manifest` can find `knowledge/seed_documents/manifest.json`
+    inside a deployed container."""
+
+    def test_dockerfile_copies_knowledge_directory(self) -> None:
+        assert "COPY knowledge ./knowledge" in _DOCKERFILE
+
+    def test_knowledge_copy_is_in_the_shared_base_stage(self) -> None:
+        base_stage, _, ai_stage = _DOCKERFILE.partition("FROM base AS ai")
+        assert "COPY knowledge ./knowledge" in base_stage
+        assert "COPY knowledge ./knowledge" not in ai_stage
+
+    def test_knowledge_copy_precedes_the_chown(self) -> None:
+        base_stage, _, _ = _DOCKERFILE.partition("FROM base AS ai")
+        copy_index = base_stage.index("COPY knowledge ./knowledge")
+        chown_index = base_stage.index("chown -R finquest:finquest /app")
+        assert copy_index < chown_index
+
+    def test_no_writable_knowledge_volume_or_bind_mount_introduced(self) -> None:
+        assert "knowledge:/app/knowledge" not in _DEV_COMPOSE
+        assert "knowledge:/app/knowledge" not in _PRODUCTION_COMPOSE
+        assert "./knowledge:" not in _DEV_COMPOSE
+        assert "./knowledge:" not in _PRODUCTION_COMPOSE
+
+
+class TestComposeS3EnvironmentVariables:
+    """Phase F1b/C3 integration: the seven S3 settings exist only on
+    `finquest-api` in both Compose files - no Celery task consumes
+    object storage yet, so no worker/web/database/redis service should
+    carry them."""
+
+    @pytest.mark.parametrize("compose_name,compose_text", [("dev", _DEV_COMPOSE), ("production", _PRODUCTION_COMPOSE)])
+    def test_all_seven_variables_present_on_finquest_api(self, compose_name: str, compose_text: str) -> None:
+        api_block = _service_block_in(compose_text, "finquest-api")
+        for var_name in _S3_ENV_VAR_NAMES:
+            assert re.search(rf"(?m)^\s+{var_name}:", api_block), (
+                f"{var_name} missing from finquest-api in {compose_name} compose file"
+            )
+
+    @pytest.mark.parametrize("compose_name,compose_text", [("dev", _DEV_COMPOSE), ("production", _PRODUCTION_COMPOSE)])
+    def test_no_s3_variable_present_on_other_services(self, compose_name: str, compose_text: str) -> None:
+        for service_name in _NON_API_SERVICE_NAMES:
+            block = _service_block_in(compose_text, service_name)
+            for var_name in _S3_ENV_VAR_NAMES:
+                assert not re.search(rf"(?m)^\s+{var_name}:", block), (
+                    f"{var_name} unexpectedly present on {service_name} in {compose_name} compose file"
+                )
 
 
 class TestProductionComposeBuildTargets:

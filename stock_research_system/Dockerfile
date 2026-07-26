@@ -32,6 +32,12 @@ RUN pip install --no-cache-dir .
 
 COPY scripts ./scripts
 
+# Version-controlled, approved seed-knowledge corpus (Phase C1-C3) -
+# read-only application content, not a writable volume. Required for
+# `cli.knowledge_base --ingest-manifest` to find
+# knowledge/seed_documents/manifest.json inside the container.
+COPY knowledge ./knowledge
+
 RUN useradd --create-home --uid 1000 finquest \
     && chown -R finquest:finquest /app
 
