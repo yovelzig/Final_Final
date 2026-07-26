@@ -18,15 +18,17 @@
 | A1 | Baseline stabilization and master-spec alignment | Complete |
 | A2 | Production image and worker-health correction | Complete (deployed to EC2 by the human operator) |
 | B | Curriculum and first usable learner flow | Local implementation and Phase B-specific verification complete. B1 and B2 are complete and reviewed. B3 implementation and verification are complete locally. The combined Phase B diff is awaiting final external review. Phase B has not been committed, pushed, merged, or deployed. |
-| C1 | Knowledge document framework | Not started |
-| C2.1 | Seed knowledge documents 01–05 | Not started |
-| C2.2 | Seed knowledge documents 06–10 | Not started |
-| C2.3 | Seed knowledge documents 11–15 | Not started |
-| F1 | S3 infrastructure and adapter | Not started |
-| C3 | Knowledge ingestion and retrieval | Not started |
+| C1 | Knowledge document framework | Complete and merged |
+| C2.1 | Seed knowledge documents 01–05 | Complete and merged |
+| C2.2 | Seed knowledge documents 06–10 | Complete and merged |
+| C2.3 | Seed knowledge documents 11–15 | Complete and merged |
+| F1a | S3 infrastructure definition | Complete and merged |
+| F1b | S3 object-storage adapter implementation | Complete and merged |
+| C3 | Knowledge ingestion (manifest-driven seed ingestion) implementation | Complete and merged |
+| F1b/C3 Integration | Local wiring of the merged F1b adapter and C3 ingestion service into an operator-run CLI, Docker image, and Compose/env config | Complete locally, verified by this pass's own test results below. Not pushed, merged (into `main`), or deployed. No AWS resource was created, no document was uploaded to real S3, and no production ingestion ran. |
 | D | Ollama Cloud Tutor | Not started |
 | E | Guardrails and Knowledge Sufficiency Gate | Not started |
-| G1 | Live Research domain | Not started |
+| G1 | Live Research domain | Complete and merged |
 | G2 | n8n Cloud, Perplexity, SEC, and company IR/market data | Not started |
 | H | OpenAI evidence synthesis | Not started |
 | I | LangGraph production orchestration (enablement) | Not started |
@@ -59,6 +61,8 @@ The combined Phase B diff is awaiting final external review.
 Phase B has not been committed, pushed, merged, or deployed.
 
 (See "Phase B — Detail" below for the full verification history, including three frontend defects found and fixed during real-stack E2E and the full integration-suite Redis-availability finding.)
+
+**Post-Phase-B merges (recorded here for the Phase Plan table above, not re-narrated in detail since this document did not execute them):** per this repository's own Git history, the following phases have since been merged to `main`, each as its own reviewed PR: C1/C2.1/C2.2/C2.3 (knowledge document framework and the 15-document seed corpus) and F1a (S3 infrastructure definition) together; F1b (the production `S3ObjectStorageAdapter`) separately; C3 (manifest-driven seed-knowledge ingestion: `SeedManifest`/`load_seed_manifest`, `ManifestIngestionService`) separately; and G1 (the provider-neutral Live Research domain) separately. None of these merges deployed anything to AWS or EC2, uploaded the seed corpus to a real S3 bucket, or ran production ingestion — F1a defines infrastructure as code only, and F1b/C3 shipped the adapter and orchestrator without any caller wiring them together yet. That wiring is this document's next entry, "Phase F1b/C3 Integration — Detail".
 
 ### Phase A1 — Detail
 
@@ -119,6 +123,20 @@ The two `test_openapi_snapshot.py` failures recorded during Stage 0 (see `curren
 - **Production deployment impact:** None yet — Phase B has not been committed, pushed, merged, or deployed.
 - **Rollback checkpoint:** A Git revert of Phase B's PR; no migration downgrade needed (none ran). Seeded curriculum data may remain after a code-only rollback, since old code can still read the unchanged schema; a database backup is needed only if a real data rollback is required.
 - **Definition of done:** met locally. All three frontend defects found during real-stack E2E are fixed and regression-tested (component tests plus a passing full E2E re-run); the E2E spec's destination-navigation assertion is now precise (a genuine retrying `toHaveURL` check, not a same-glob false pass); the full backend integration suite is confirmed clean with Redis reachable; production Compose validation passed. Phase B local implementation and Phase B-specific verification are complete. B1 and B2 are complete and reviewed. B3 implementation and verification are complete locally. The combined Phase B diff is awaiting final external review. Phase B has not been committed, pushed, merged, or deployed.
+
+---
+
+### Phase F1b/C3 Integration — Detail
+
+- **Goal:** Wire the already-merged, already-reviewed F1b `S3ObjectStorageAdapter` and C3 `ManifestIngestionService`/`SeedManifest` into something an operator can actually run locally: a `cli.knowledge_base --ingest-manifest` command, a corrected Docker image that ships the version-controlled 15-document seed corpus, and Compose/env wiring for the seven S3 settings — without redesigning any already-merged component.
+- **Allowed changes (all applied):** `src/stock_research_core/cli/knowledge_base.py` (`--ingest-manifest`/`--document-code`/`--dry-run` flags, argument-combination validation that runs before any database engine, embedding provider, `ObjectStorageSettings`, or `S3ObjectStorageAdapter` is constructed, and a manifest-ingestion summary printer); `Dockerfile` (`COPY knowledge ./knowledge` in the shared `base` stage, alongside the other application artifacts, before the existing `chown`); `.env.example` / `.env.production.example` (the seven `OBJECT_STORAGE_*`/`AWS_REGION`/`S3_*` settings, with production comments stating credentials come only from boto3's default credential chain / EC2 Instance Profile); `docker-compose.yml` / `docker-compose.production.yml` (the same seven variables added only to `finquest-api`'s `environment:`, since no Celery task consumes object storage yet); this document; new/extended tests (see below).
+- **Prohibited changes (respected):** `ManifestIngestionService`, `SeedManifest`, `S3ObjectStorageAdapter`, `ObjectStoragePort`, `KnowledgeIngestionService`, chunking, embeddings, hybrid retrieval, ORM/repositories/UoW, Alembic migrations, G1 Live Research, `app_factory.py`, API routes, Celery tasks, n8n workflows, and the frontend were not touched; no local filesystem/fake object-storage provider, no static AWS credentials, no presigned-URL support, and no automatic ingestion-on-startup were added.
+- **Expected migrations:** None — this pass is CLI/Docker/Compose/env wiring plus tests only; Alembic head is unchanged at `0012_live_research_domain`.
+- **Expected affected services:** `finquest-api` only (the new CLI command and the seven env vars). No worker, `finquest-web`, `stock-db`, or `redis` service was changed.
+- **Local test requirements:** new `tests/unit/test_knowledge_base_manifest_cli.py` (argument validation, lazy S3 construction, exit codes, reporting — all against injected fakes, no real boto3/AWS); extended `tests/unit/test_docker_image_contract.py` (Dockerfile `COPY knowledge ./knowledge` contract, Compose S3-variable placement contract); new `tests/integration/test_full_seed_manifest_ingestion.py` (the real 15-document corpus through the real `ManifestIngestionService`/`KnowledgeIngestionService`/PostgreSQL, an in-test `ObjectStoragePort` fake only, idempotency, and a retrieval smoke check); existing focused unit/integration suites for F1b/C3 re-run unmodified. See the verification results recorded in this pass's commit message / PR description for exact pass counts.
+- **Production deployment impact:** None — no AWS resource was created or modified, no document was uploaded to a real S3 bucket, no EC2 host was touched, and no production ingestion ran. The Docker image change means a future rebuild will contain `/app/knowledge/seed_documents/manifest.json` and `/app/knowledge/seed_documents/en/*.md`, but no image was built as part of this pass.
+- **Rollback checkpoint:** A Git revert of this pass's single commit — every change here is additive CLI/Docker/Compose/env wiring plus tests, with no migration and no production action to unwind.
+- **Definition of done:** `--ingest-manifest --dry-run` and `--ingest-manifest --document-code kb-en-001` both work against the canonical `knowledge/seed_documents/manifest.json` path; an invalid flag combination exits `2` before any engine/client is constructed; `--status`/`--seed-curriculum`/`--ingest-file`/`--search`/`--help` never construct an `S3ObjectStorageAdapter`; both Docker stages contain the seed corpus; the seven S3 variables exist only on `finquest-api` in both Compose files; the full 15-document corpus ingests successfully and idempotently against the real test database with a passing retrieval smoke check; this document's Phase Plan table reflects C1/C2.1-2.3/F1a/F1b/C3/G1 as complete and merged and this integration as complete locally, without claiming any AWS/EC2/production action took place.
 
 ---
 

@@ -118,6 +118,19 @@ services:
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-finquest-learning-coach}
       LANGSMITH_TRACE_CONTENT: ${LANGSMITH_TRACE_CONTENT:-false}
+      # Phase F1b: shared S3 object storage, used only by the
+      # operator-run `cli.knowledge_base --ingest-manifest` command
+      # inside this container - no Celery task consumes it yet, so it
+      # is not added to any worker service. "s3" is the only supported
+      # provider; credentials come from boto3's default credential
+      # chain, never a static access key here.
+      OBJECT_STORAGE_PROVIDER: ${OBJECT_STORAGE_PROVIDER:-s3}
+      AWS_REGION: ${AWS_REGION:-us-east-2}
+      S3_BUCKET_NAME: ${S3_BUCKET_NAME:-finquest-knowledge-prod-881490130721-us-east-2}
+      S3_KNOWLEDGE_PREFIX: ${S3_KNOWLEDGE_PREFIX:-knowledge/}
+      S3_EXTRACTED_TEXT_PREFIX: ${S3_EXTRACTED_TEXT_PREFIX:-knowledge-extracted/}
+      S3_RESEARCH_ARTIFACT_PREFIX: ${S3_RESEARCH_ARTIFACT_PREFIX:-research-artifacts/}
+      S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-false}
     ports:
       - "${API_HOST_PORT:-8080}:8080"
     healthcheck:

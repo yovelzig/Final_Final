@@ -19,6 +19,14 @@ Search:
     python -m stock_research_core.cli.knowledge_base `
       --search "Why does diversification reduce concentration risk?" --top-k 5
 
+Ingest the version-controlled seed-knowledge manifest (Phase F1b/C3):
+
+    python -m stock_research_core.cli.knowledge_base `
+      --ingest-manifest --dry-run
+
+    python -m stock_research_core.cli.knowledge_base `
+      --ingest-manifest --document-code kb-en-001
+
 This module is a composition root: it is the one place outside the
 infrastructure layer allowed to import concrete adapters directly.
 """
@@ -35,10 +43,20 @@ from sqlalchemy import text
 
 from stock_research_core.application.ai_tutor.chunking import HeadingAwareWordChunker
 from stock_research_core.application.ai_tutor.knowledge_ingestion import KnowledgeIngestionService
+from stock_research_core.application.ai_tutor.manifest_ingestion import (
+    ManifestIngestionService,
+    ManifestIngestionSummary,
+)
 from stock_research_core.application.ai_tutor.models import TutorContext
 from stock_research_core.application.ai_tutor.ports import EmbeddingPort
 from stock_research_core.application.ai_tutor.retrieval import DEFAULT_TOP_K, HybridKnowledgeRetriever
-from stock_research_core.application.exceptions import StockResearchError, UnsupportedDocumentError
+from stock_research_core.application.ai_tutor.seed_manifest import load_seed_manifest
+from stock_research_core.application.exceptions import (
+    ObjectStorageError,
+    SeedManifestValidationError,
+    StockResearchError,
+    UnsupportedDocumentError,
+)
 from stock_research_core.domain.ai_tutor.enums import KnowledgeApprovalStatus, TutorContextType
 from stock_research_core.infrastructure.ai_tutor.config import EmbeddingSettings
 from stock_research_core.infrastructure.ai_tutor.deterministic_fake_embeddings import (
@@ -50,6 +68,13 @@ from stock_research_core.infrastructure.ai_tutor.sentence_transformer_embeddings
 from stock_research_core.infrastructure.database.config import DatabaseSettings
 from stock_research_core.infrastructure.database.engine import create_database_engine, create_session_factory
 from stock_research_core.infrastructure.database.unit_of_work import SqlAlchemyUnitOfWork
+from stock_research_core.infrastructure.object_storage.config import ObjectStorageSettings
+from stock_research_core.infrastructure.object_storage.s3_adapter import S3ObjectStorageAdapter
+
+# The version-controlled, approved seed-knowledge corpus - the only
+# supported corpus in this phase (no user-configurable manifest path).
+SEED_DOCUMENTS_ROOT = Path("knowledge/seed_documents")
+SEED_MANIFEST_PATH = SEED_DOCUMENTS_ROOT / "manifest.json"
 
 
 def _build_embedding_provider(settings: EmbeddingSettings) -> EmbeddingPort:
@@ -78,7 +103,31 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--search", metavar="QUERY", default=None, help="Run a hybrid search query")
     parser.add_argument("--top-k", type=int, default=DEFAULT_TOP_K, help="Number of results for --search")
+    parser.add_argument(
+        "--ingest-manifest", action="store_true",
+        help="Ingest the version-controlled seed-knowledge manifest (knowledge/seed_documents/manifest.json)",
+    )
+    parser.add_argument(
+        "--document-code", metavar="DOCUMENT_CODE", default=None,
+        help="Restrict --ingest-manifest to a single manifest document_id (e.g. kb-en-001)",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="With --ingest-manifest, plan the run without writing to object storage or the database",
+    )
     return parser
+
+
+def _validate_manifest_arg_combination(args: argparse.Namespace) -> str | None:
+    """Return an error message if the CLI arguments are an invalid combination,
+    or `None` if they are valid. Checked before any engine/provider/client is
+    constructed, so an invalid combination never touches the database, an
+    embedding provider, boto3, or AWS."""
+    if args.document_code is not None and not args.ingest_manifest:
+        return "--document-code requires --ingest-manifest"
+    if args.dry_run and not args.ingest_manifest:
+        return "--dry-run requires --ingest-manifest"
+    return None
 
 
 async def _print_status(uow_factory, engine, embedding_settings: EmbeddingSettings) -> None:
@@ -159,7 +208,78 @@ async def _search(retriever: HybridKnowledgeRetriever, query: str, top_k: int) -
         print(f"    available_at={candidate.document.available_at.date()} excerpt={excerpt!r}\n")
 
 
+def _print_manifest_summary(summary: ManifestIngestionSummary, *, dry_run: bool) -> None:
+    mode = "DRY RUN" if dry_run else "APPLY"
+    print(f"Manifest ingestion ({mode}):")
+    print(f"  selected/processed:     {summary.processed_count}")
+    print(f"  succeeded:              {summary.succeeded_count}")
+    print(f"  failed:                 {summary.failed_count}")
+    print(f"  skipped (unapproved):   {len(summary.skipped_entries)}")
+
+    for result in summary.results:
+        version_id = result.object_version_id or "(none)"
+        if not result.succeeded:
+            print(f"  [{result.document_code}] FAILED key={result.object_key} reason={result.failure_reason}")
+            continue
+        if dry_run:
+            action = "would-upload" if result.object_version_id is None else "already-current"
+        else:
+            action = "uploaded" if result.upload_performed else "already-current"
+        print(
+            f"  [{result.document_code}] key={result.object_key} version={version_id} action={action} "
+            f"created={result.documents_created} unchanged={result.documents_skipped_unchanged} "
+            f"archived={result.documents_archived}"
+        )
+
+    if summary.skipped_entries:
+        print("  skipped entries (review_status is not approved_seed):")
+        for skipped in summary.skipped_entries:
+            print(f"    - {skipped.document_code} ({skipped.review_status}): {skipped.reason}")
+
+
+async def _ingest_manifest(
+    ingestion_service: KnowledgeIngestionService, *, document_code: str | None, dry_run: bool
+) -> int:
+    if not SEED_DOCUMENTS_ROOT.is_dir():
+        raise SeedManifestValidationError(f"seed documents root not found: '{SEED_DOCUMENTS_ROOT}'")
+    if not SEED_MANIFEST_PATH.is_file():
+        raise SeedManifestValidationError(f"seed manifest not found: '{SEED_MANIFEST_PATH}'")
+
+    manifest = load_seed_manifest(SEED_MANIFEST_PATH, seed_documents_root=SEED_DOCUMENTS_ROOT)
+
+    object_storage_settings = ObjectStorageSettings()
+    if object_storage_settings.object_storage_provider != "s3":
+        raise ObjectStorageError(
+            f"unsupported OBJECT_STORAGE_PROVIDER {object_storage_settings.object_storage_provider!r} "
+            "(only 's3' is supported)"
+        )
+    object_storage = S3ObjectStorageAdapter(object_storage_settings)
+
+    manifest_service = ManifestIngestionService(
+        object_storage=object_storage,
+        knowledge_ingestion_service=ingestion_service,
+        seed_documents_root=SEED_DOCUMENTS_ROOT,
+        knowledge_prefix=object_storage_settings.s3_knowledge_prefix,
+    )
+
+    summary = await manifest_service.ingest(
+        manifest=manifest,
+        document_code=document_code,
+        dry_run=dry_run,
+        approval_status=KnowledgeApprovalStatus.APPROVED,
+    )
+
+    _print_manifest_summary(summary, dry_run=dry_run)
+
+    return 1 if summary.failed_count > 0 else 0
+
+
 async def _run(args: argparse.Namespace) -> int:
+    validation_error = _validate_manifest_arg_combination(args)
+    if validation_error is not None:
+        print(f"error: {validation_error}", file=sys.stderr)
+        return 2
+
     settings = DatabaseSettings()
     embedding_settings = EmbeddingSettings()
     engine = create_database_engine(settings)
@@ -172,6 +292,8 @@ async def _run(args: argparse.Namespace) -> int:
             unit_of_work_factory=uow_factory, chunker=chunker, embedding_provider=embedding_provider
         )
         retriever = HybridKnowledgeRetriever(unit_of_work_factory=uow_factory, embedding_provider=embedding_provider)
+
+        exit_code = 0
 
         if args.status:
             await _print_status(uow_factory, engine, embedding_settings)
@@ -188,11 +310,19 @@ async def _run(args: argparse.Namespace) -> int:
         if args.search:
             await _search(retriever, args.search, args.top_k)
 
-        if not any((args.status, args.seed_curriculum, args.ingest_file, args.search)):
-            print("error: specify --status, --seed-curriculum, --ingest-file, or --search", file=sys.stderr)
+        if args.ingest_manifest:
+            exit_code = await _ingest_manifest(
+                ingestion_service, document_code=args.document_code, dry_run=args.dry_run
+            )
+
+        if not any((args.status, args.seed_curriculum, args.ingest_file, args.search, args.ingest_manifest)):
+            print(
+                "error: specify --status, --seed-curriculum, --ingest-file, --search, or --ingest-manifest",
+                file=sys.stderr,
+            )
             return 2
 
-        return 0
+        return exit_code
     except UnsupportedDocumentError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

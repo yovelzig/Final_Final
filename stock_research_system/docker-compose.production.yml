@@ -190,6 +190,21 @@ services:
       LEARNING_QUALITY_MAX_RETENTION_DAYS: ${LEARNING_QUALITY_MAX_RETENTION_DAYS:-60}
       QUALITY_ALLOW_PRODUCTION_SAMPLE_CAPTURE: ${QUALITY_ALLOW_PRODUCTION_SAMPLE_CAPTURE:-false}
 
+      # Shared S3 object storage (Phase F1b) - used only by the
+      # operator-run `cli.knowledge_base --ingest-manifest` command
+      # inside this container. No Celery task consumes object storage
+      # yet, so these are not added to any worker service. "s3" is the
+      # only supported provider; credentials come from the EC2 Instance
+      # Profile via boto3's default credential chain, never a static
+      # access key here.
+      OBJECT_STORAGE_PROVIDER: ${OBJECT_STORAGE_PROVIDER:-s3}
+      AWS_REGION: ${AWS_REGION:-us-east-2}
+      S3_BUCKET_NAME: ${S3_BUCKET_NAME:-finquest-knowledge-prod-881490130721-us-east-2}
+      S3_KNOWLEDGE_PREFIX: ${S3_KNOWLEDGE_PREFIX:-knowledge/}
+      S3_EXTRACTED_TEXT_PREFIX: ${S3_EXTRACTED_TEXT_PREFIX:-knowledge-extracted/}
+      S3_RESEARCH_ARTIFACT_PREFIX: ${S3_RESEARCH_ARTIFACT_PREFIX:-research-artifacts/}
+      S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-false}
+
     ports:
       - "127.0.0.1:${API_HOST_PORT:-8080}:8080"
     healthcheck:
