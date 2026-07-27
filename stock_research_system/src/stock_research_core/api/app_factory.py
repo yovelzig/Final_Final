@@ -78,6 +78,7 @@ from stock_research_core.infrastructure.ai_tutor.deterministic_fake_embeddings i
     DeterministicFakeEmbeddingAdapter,
 )
 from stock_research_core.infrastructure.ai_tutor.extractive_tutor import DeterministicExtractiveTutor
+from stock_research_core.infrastructure.ai_tutor.ollama_cloud_tutor import OllamaCloudTutorAdapter
 from stock_research_core.infrastructure.ai_tutor.openai_compatible_tutor import OpenAICompatibleTutorAdapter
 from stock_research_core.infrastructure.ai_tutor.production_safety import (
     assert_embedding_provider_production_safe,
@@ -132,12 +133,36 @@ def _build_embedding_provider(settings: EmbeddingSettings):
 
 
 def _build_tutor_model(settings: TutorModelSettings) -> TutorModelPort:
+    if settings.tutor_model_provider == "extractive":
+        return DeterministicExtractiveTutor()
     if settings.tutor_model_provider == "openai_compatible":
         return OpenAICompatibleTutorAdapter(
             base_url=settings.tutor_model_base_url, api_key=settings.tutor_model_api_key,
             model_name=settings.tutor_model_name, timeout_seconds=settings.tutor_model_timeout_seconds,
         )
-    return DeterministicExtractiveTutor()
+    if settings.tutor_model_provider == "ollama_cloud":
+        return OllamaCloudTutorAdapter(
+            base_url=settings.tutor_model_base_url, api_key=settings.tutor_model_api_key,
+            model_name=settings.tutor_model_name, timeout_seconds=settings.tutor_model_timeout_seconds,
+            thinking_level=settings.tutor_model_thinking_level,
+        )
+    # `TutorModelSettings`'s own validator already rejects any other value at
+    # construction time - this branch only guards against a future settings
+    # change that weakens that validation, never silently falling back to
+    # `extractive`.
+    raise ValueError(f"Unsupported tutor_model_provider {settings.tutor_model_provider!r}")
+
+
+async def _close_tutor_model(tutor_model: TutorModelPort) -> None:
+    """Closes an HTTP-backed tutor adapter's own client on shutdown.
+
+    `DeterministicExtractiveTutor` owns no client and is left alone. Each
+    HTTP adapter's own `aclose()` only closes a client it constructed itself
+    (`_owns_client`) - a client the caller injected is never closed here or
+    inside the adapter.
+    """
+    if isinstance(tutor_model, (OpenAICompatibleTutorAdapter, OllamaCloudTutorAdapter)):
+        await tutor_model.aclose()
 
 
 def create_app(
@@ -351,8 +376,7 @@ def create_app(
         try:
             yield
         finally:
-            if isinstance(app.state.tutor_model, OpenAICompatibleTutorAdapter):
-                await app.state.tutor_model.aclose()
+            await _close_tutor_model(app.state.tutor_model)
             if intent_model_client is not None:
                 await intent_model_client.aclose()
             if checkpointer_pool is not None:

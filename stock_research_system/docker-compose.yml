@@ -84,6 +84,17 @@ services:
       # semantic embeddings should rebuild with the `ai` target and
       # override this to `sentence_transformer`.
       EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-deterministic_fake}
+      # Grounded AI tutor - defaults to extractive (network-free, no API
+      # key). TUTOR_MODEL_API_KEY defaults to empty; a real key must never
+      # be committed here - set it only in a local, gitignored .env used
+      # to populate this variable at `docker compose up` time.
+      TUTOR_MODEL_PROVIDER: ${TUTOR_MODEL_PROVIDER:-extractive}
+      TUTOR_MODEL_BASE_URL: "${TUTOR_MODEL_BASE_URL:-}"
+      TUTOR_MODEL_API_KEY: "${TUTOR_MODEL_API_KEY:-}"
+      TUTOR_MODEL_NAME: "${TUTOR_MODEL_NAME:-}"
+      TUTOR_MODEL_TIMEOUT_SECONDS: ${TUTOR_MODEL_TIMEOUT_SECONDS:-60}
+      # Phase D: only consulted when TUTOR_MODEL_PROVIDER=ollama_cloud.
+      TUTOR_MODEL_THINKING_LEVEL: ${TUTOR_MODEL_THINKING_LEVEL:-low}
       FINQUEST_ENV: ${FINQUEST_ENV:-development}
       ALLOW_FAKE_EMBEDDINGS_IN_PRODUCTION: ${ALLOW_FAKE_EMBEDDINGS_IN_PRODUCTION:-false}
       REDIS_URL: redis://redis:6379/0

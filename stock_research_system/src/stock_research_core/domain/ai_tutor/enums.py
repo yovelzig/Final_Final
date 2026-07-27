@@ -88,6 +88,7 @@ class TutorAnswerStatus(StrEnum):
 class TutorProviderType(StrEnum):
     EXTRACTIVE = "EXTRACTIVE"
     OPENAI_COMPATIBLE = "OPENAI_COMPATIBLE"
+    OLLAMA_CLOUD = "OLLAMA_CLOUD"
 
 
 class RetrievalMethod(StrEnum):

@@ -39,7 +39,14 @@ dependencies = [
 dev = [
     "pytest>=8,<9",
     "pytest-asyncio>=0.23,<2",
-    "pytest-repeat>=0.9,<1"
+    "pytest-repeat>=0.9,<1",
+    # Test-only: lets tests/integration/test_ollama_cloud_live.py build an
+    # httpx client that trusts the OS certificate store (e.g. a corporate
+    # TLS-inspection proxy's locally-trusted root) via an explicit
+    # truststore.SSLContext. Never imported by application/library code and
+    # never installed in a production image - see that test file's
+    # docstring for the opt-in OLLAMA_LIVE_USE_SYSTEM_TRUST=1 flag.
+    "truststore>=0.9,<1"
 ]
 ai_tutor = [
     "sentence-transformers>=3,<4"

@@ -114,6 +114,8 @@ services:
       TUTOR_MODEL_API_KEY: "${TUTOR_MODEL_API_KEY:-}"
       TUTOR_MODEL_NAME: "${TUTOR_MODEL_NAME:-}"
       TUTOR_MODEL_TIMEOUT_SECONDS: ${TUTOR_MODEL_TIMEOUT_SECONDS:-60}
+      # Phase D: only consulted when TUTOR_MODEL_PROVIDER=ollama_cloud.
+      TUTOR_MODEL_THINKING_LEVEL: ${TUTOR_MODEL_THINKING_LEVEL:-low}
 
       # Runtime
       FINQUEST_ENV: ${FINQUEST_ENV:-production}
