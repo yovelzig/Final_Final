@@ -461,3 +461,48 @@ class InvalidClaimStatusTransitionError(StockResearchError):
     claim's current `ClaimEvidenceLink` rows (e.g. CORROBORATED requires a
     SUPPORTS link; UNRESOLVED_CONFLICT requires both a SUPPORTS and a
     CONTRADICTS link)."""
+
+
+# -- Phase G2A1: Live Research provider adapters (Perplexity Search, SEC EDGAR) -----------------------------------------------
+
+
+class LiveResearchProviderError(ProviderRequestError):
+    """A Live Research provider (Perplexity Search, SEC EDGAR) request
+    failed. Never carries the raw upstream response body, an API key, or
+    an `Authorization` header - only a sanitized provider/endpoint/status
+    description."""
+
+
+class LiveResearchProviderTimeoutError(LiveResearchProviderError):
+    """The provider request exceeded the configured transport timeout."""
+
+
+class LiveResearchProviderRateLimitError(LiveResearchProviderError):
+    """The provider responded HTTP 429.
+
+    `retry_after_seconds` is populated only when the upstream
+    `Retry-After` header was present and parsed as a safe, bounded
+    non-negative integer; `None` otherwise. This exception never sleeps
+    or retries on its own - that policy belongs to a later phase (G2B).
+    """
+
+    def __init__(self, message: str, *, retry_after_seconds: int | None = None) -> None:
+        super().__init__(message)
+        self.retry_after_seconds = retry_after_seconds
+
+
+class LiveResearchProviderAccessError(LiveResearchProviderError):
+    """The provider responded HTTP 401 or HTTP 403."""
+
+
+class LiveResearchProviderResponseError(LiveResearchProviderError):
+    """The provider responded with another 4xx/5xx status, or returned a
+    structurally invalid or non-JSON body."""
+
+
+class LiveResearchProviderConfigurationError(StockResearchError):
+    """The Live Research provider settings are not usable as configured
+    (missing required secret, non-HTTPS base URL, out-of-range numeric
+    setting, ...). Never a provider *request* failure - raised while
+    constructing settings/adapters, before any network call would be
+    attempted."""
