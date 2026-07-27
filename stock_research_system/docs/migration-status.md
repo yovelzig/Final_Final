@@ -28,7 +28,7 @@
 | F1b/C3 Integration | Local wiring of the merged F1b adapter and C3 ingestion service into an operator-run CLI, Docker image, and Compose/env config | Complete locally, verified by this pass's own test results below. Not pushed, merged (into `main`), or deployed. No AWS resource was created, no document was uploaded to real S3, and no production ingestion ran. |
 | D | Ollama Cloud Tutor | **Complete, merged, and deployed to production.** Production's active tutor configuration is `TUTOR_MODEL_PROVIDER=ollama_cloud`, `TUTOR_MODEL_BASE_URL=https://ollama.com/api`, `TUTOR_MODEL_NAME=gpt-oss:20b`, `TUTOR_MODEL_THINKING_LEVEL=low`. |
 | E0 | Knowledge Sufficiency Gate — production-corpus calibration | Complete. See "Phase E0/E1 — Knowledge Sufficiency Gate — Detail" below for the calibrated vector threshold and why `combined_score` is unsuitable as the sufficiency signal. |
-| E1 | Knowledge Sufficiency Gate — implementation | **Local implementation only, verified by this pass's own test results below. Not committed, pushed, merged, or deployed.** `TUTOR_KNOWLEDGE_SUFFICIENCY_GATE_ENABLED` defaults to `false` everywhere (rollback-safe) — deploying this code alone does not change production's current Ollama Cloud tutor behavior. |
+| E1 | Knowledge Sufficiency Gate — implementation | **Complete, merged through PR #12, deployed, and enabled in production.** Production source commit is `726ec5872497939beb5d0d41d879206970744e6b`; the active API image is `sha256:9801fcc68ab44fc28e3d48d3ae05759f2200bd507c6af03e39c6cdb297a0269d`. The active implementation is `RuleBasedKnowledgeSufficiencyGate` with thresholds `vector=0.52`, `lexical=0.05`, and `metadata=0.90`. The production-corpus canary passed 10/10 and authenticated HTTP E2E validated the grounded-answer, current-information fallback, and weak-retrieval fallback paths. No database migration was required. |
 | G1 | Live Research domain | Complete and merged |
 | G2 | n8n Cloud, Perplexity, SEC, and company IR/market data | Not started |
 | H | OpenAI evidence synthesis | Not started |
@@ -49,9 +49,9 @@
 
 ### Active Phase
 
-**Phase A2 is complete and was deployed to EC2 by the human operator.** The current phase is **B — Curriculum and first usable learner flow**.
+**Phase E is complete, deployed, and active in production.** The Phase Plan table above remains authoritative for the status of all other phases; this documentation-only update changes no other phase's implementation, merge, or deployment status.
 
-**Per this repository's own Git history, Phase D (native Ollama Cloud Tutor) has since been merged to `main` and deployed — production's active tutor configuration is `TUTOR_MODEL_PROVIDER=ollama_cloud`, `TUTOR_MODEL_BASE_URL=https://ollama.com/api`, `TUTOR_MODEL_NAME=gpt-oss:20b`, `TUTOR_MODEL_THINKING_LEVEL=low`.** Phase E0 (production-corpus calibration for the Knowledge Sufficiency Gate) is complete, and Phase E1 (the gate's implementation) exists **locally only** as of this pass — not committed, pushed, merged, or deployed, and feature-flagged off (`TUTOR_KNOWLEDGE_SUFFICIENCY_GATE_ENABLED=false`) so it cannot change production's current behavior even once it is deployed. See "Phase E0/E1 — Knowledge Sufficiency Gate — Detail" below.
+**Phase D and Phase E are complete in production.** The active educational Tutor remains Ollama Cloud with `TUTOR_MODEL_PROVIDER=ollama_cloud`, `TUTOR_MODEL_BASE_URL=https://ollama.com/api`, `TUTOR_MODEL_NAME=gpt-oss:20b`, and `TUTOR_MODEL_THINKING_LEVEL=low`. Phase E0 production-corpus calibration is complete. Phase E1 was merged through PR #12 at merge commit `726ec5872497939beb5d0d41d879206970744e6b`, deployed by the human operator on 2026-07-27, and activated with `TUTOR_KNOWLEDGE_SUFFICIENCY_GATE_ENABLED=true`. Production uses `RuleBasedKnowledgeSufficiencyGate` with calibrated thresholds `vector=0.52`, `lexical=0.05`, and `metadata=0.90`. The rollout passed production-corpus canary and authenticated HTTP E2E verification without a database migration.
 
 Phase B local implementation and Phase B-specific verification are complete.
 
@@ -66,6 +66,23 @@ Phase B has not been committed, pushed, merged, or deployed.
 (See "Phase B — Detail" below for the full verification history, including three frontend defects found and fixed during real-stack E2E and the full integration-suite Redis-availability finding.)
 
 **Post-Phase-B merges (recorded here for the Phase Plan table above, not re-narrated in detail since this document did not execute them):** per this repository's own Git history, the following phases have since been merged to `main`, each as its own reviewed PR: C1/C2.1/C2.2/C2.3 (knowledge document framework and the 15-document seed corpus) and F1a (S3 infrastructure definition) together; F1b (the production `S3ObjectStorageAdapter`) separately; C3 (manifest-driven seed-knowledge ingestion: `SeedManifest`/`load_seed_manifest`, `ManifestIngestionService`) separately; and G1 (the provider-neutral Live Research domain) separately. None of these merges deployed anything to AWS or EC2, uploaded the seed corpus to a real S3 bucket, or ran production ingestion — F1a defines infrastructure as code only, and F1b/C3 shipped the adapter and orchestrator without any caller wiring them together yet. That wiring is this document's next entry, "Phase F1b/C3 Integration — Detail".
+
+### Phase E - Production activation record
+
+- **Implementation commit:** `78d675f67154a86a132946d2b57245428d8cd030`.
+- **Merge:** PR #12; merge commit `726ec5872497939beb5d0d41d879206970744e6b`.
+- **Human-operated production deployment date:** 2026-07-27.
+- **Active API image:** `sha256:9801fcc68ab44fc28e3d48d3ae05759f2200bd507c6af03e39c6cdb297a0269d`.
+- **Tutor runtime:** `ollama_cloud` / `OllamaCloudTutorAdapter` / `gpt-oss:20b`.
+- **Active sufficiency policy:** `RuleBasedKnowledgeSufficiencyGate`, with `TUTOR_KNOWLEDGE_SUFFICIENCY_GATE_ENABLED=true`.
+- **Calibrated thresholds:** vector `0.52`, lexical `0.05`, context metadata `0.90`.
+- **E2A deployment result:** the E1 image was first deployed with the gate disabled; health, readiness, image identity, Compose validation, and runtime composition all passed.
+- **E2B production-corpus canary:** 10/10 expected decisions passed. Five approved educational questions were accepted, four current-information requests were rejected, and one unsupported advanced-derivatives question was rejected for below-threshold relevance. The stable terms `current ratio` and `current yield` produced no temporal-classifier false positives.
+- **E2C authenticated HTTP E2E:** an answerable compound-interest request returned `VALIDATED`, `GROUNDED`, and five citations. Current NVIDIA price and synthetic-CDO requests returned the exact approved insufficient-evidence fallback, `INSUFFICIENT_EVIDENCE`, and zero citations.
+- **Database:** no Phase E migration; production remains at `0012_live_research_domain`.
+- **Runtime health:** all eight production containers were healthy after activation, `/health` and `/ready` passed, and the targeted API log audit returned no matching errors.
+- **Rollback posture:** the pre-E2A API image and pre-activation production environment were checkpointed by the human operator. Disabling the feature flag composes `DisabledKnowledgeSufficiencyGate` and restores the pre-activation routing behavior.
+- **Production source of truth:** the operator-owned EC2 deployment log remains authoritative for the exact live-deployment history; this section is the repository's reviewed historical record.
 
 ### Phase A1 — Detail
 
