@@ -207,6 +207,72 @@ class TestComposeTutorModelEnvironmentVariables:
         )
 
 
+_KNOWLEDGE_SUFFICIENCY_ENV_VAR_NAMES = (
+    "TUTOR_KNOWLEDGE_SUFFICIENCY_GATE_ENABLED",
+    "TUTOR_KNOWLEDGE_SUFFICIENCY_MIN_VECTOR_SCORE",
+    "TUTOR_KNOWLEDGE_SUFFICIENCY_MIN_LEXICAL_SCORE",
+    "TUTOR_KNOWLEDGE_SUFFICIENCY_MIN_CONTEXT_METADATA_SCORE",
+)
+
+
+class TestComposeKnowledgeSufficiencyEnvironmentVariables:
+    """Phase E1: the four Knowledge Sufficiency Gate settings must reach
+    `finquest-api` - the only service that constructs and calls
+    `GroundedAITutorService` - in both Compose files, defaulting to the
+    disabled/rollback-safe state, and must not be added to any worker or
+    the web service."""
+
+    @pytest.mark.parametrize("compose_name,compose_text", [("dev", _DEV_COMPOSE), ("production", _PRODUCTION_COMPOSE)])
+    def test_all_four_variables_present_on_finquest_api(self, compose_name: str, compose_text: str) -> None:
+        api_block = _service_block_in(compose_text, "finquest-api")
+        for var_name in _KNOWLEDGE_SUFFICIENCY_ENV_VAR_NAMES:
+            assert re.search(rf"(?m)^\s+{var_name}:", api_block), (
+                f"{var_name} missing from finquest-api in {compose_name} compose file"
+            )
+
+    @pytest.mark.parametrize("compose_name,compose_text", [("dev", _DEV_COMPOSE), ("production", _PRODUCTION_COMPOSE)])
+    def test_no_knowledge_sufficiency_variable_present_on_other_services(
+        self, compose_name: str, compose_text: str
+    ) -> None:
+        for service_name in _NON_API_SERVICE_NAMES:
+            block = _service_block_in(compose_text, service_name)
+            for var_name in _KNOWLEDGE_SUFFICIENCY_ENV_VAR_NAMES:
+                assert not re.search(rf"(?m)^\s+{var_name}:", block), (
+                    f"{var_name} unexpectedly present on {service_name} in {compose_name} compose file"
+                )
+
+    @pytest.mark.parametrize("compose_name,compose_text", [("dev", _DEV_COMPOSE), ("production", _PRODUCTION_COMPOSE)])
+    def test_gate_defaults_to_disabled(self, compose_name: str, compose_text: str) -> None:
+        api_block = _service_block_in(compose_text, "finquest-api")
+        match = re.search(
+            r"(?m)^\s+TUTOR_KNOWLEDGE_SUFFICIENCY_GATE_ENABLED:\s*\$\{TUTOR_KNOWLEDGE_SUFFICIENCY_GATE_ENABLED:-(\S+)\}",
+            api_block,
+        )
+        assert match is not None, (
+            f"TUTOR_KNOWLEDGE_SUFFICIENCY_GATE_ENABLED has no shell default in {compose_name} compose file"
+        )
+        assert match.group(1) == "false", (
+            f"TUTOR_KNOWLEDGE_SUFFICIENCY_GATE_ENABLED must default to false in {compose_name} compose file, "
+            f"found {match.group(1)!r}"
+        )
+
+    @pytest.mark.parametrize("compose_name,compose_text", [("dev", _DEV_COMPOSE), ("production", _PRODUCTION_COMPOSE)])
+    def test_thresholds_default_to_calibrated_values(self, compose_name: str, compose_text: str) -> None:
+        api_block = _service_block_in(compose_text, "finquest-api")
+        expected_defaults = {
+            "TUTOR_KNOWLEDGE_SUFFICIENCY_MIN_VECTOR_SCORE": "0.52",
+            "TUTOR_KNOWLEDGE_SUFFICIENCY_MIN_LEXICAL_SCORE": "0.05",
+            "TUTOR_KNOWLEDGE_SUFFICIENCY_MIN_CONTEXT_METADATA_SCORE": "0.90",
+        }
+        for var_name, expected_default in expected_defaults.items():
+            match = re.search(rf"(?m)^\s+{var_name}:\s*\$\{{{var_name}:-(\S+)\}}", api_block)
+            assert match is not None, f"{var_name} has no shell default in {compose_name} compose file"
+            assert match.group(1) == expected_default, (
+                f"{var_name} expected default {expected_default!r} in {compose_name} compose file, "
+                f"found {match.group(1)!r}"
+            )
+
+
 class TestProductionComposeBuildTargets:
     def test_every_service_target_matches_the_expected_contract(self) -> None:
         for service_name, expected_target in _WORKER_TARGET_CONTRACT.items():

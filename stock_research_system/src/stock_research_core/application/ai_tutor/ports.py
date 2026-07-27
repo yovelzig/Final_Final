@@ -15,6 +15,7 @@ from uuid import UUID
 
 from stock_research_core.application.ai_tutor.models import (
     KnowledgeIngestionRunRecord,
+    KnowledgeSufficiencyDecision,
     RetrievalCandidate,
     TutorContext,
     TutorModelRequest,
@@ -95,6 +96,19 @@ class TutorGuardrailPort(Protocol):
         retrieved_candidates: list[RetrievalCandidate],
         context: TutorContext,
     ) -> tuple[GroundingStatus, list[str]]: ...
+
+
+class KnowledgeSufficiencyGatePort(Protocol):
+    """Phase E1: deterministic gate deciding whether retrieved evidence is
+    strong enough to reach a `TutorModelPort` at all.
+
+    Runs after retrieval, before prompt construction - a distinct
+    checkpoint from `TutorGuardrailPort`, which only classifies the
+    learner's own message before/after generation."""
+
+    def evaluate(
+        self, *, query: str, candidates: list[RetrievalCandidate], context: TutorContext
+    ) -> KnowledgeSufficiencyDecision: ...
 
 
 class TutorPromptBuilderPort(Protocol):

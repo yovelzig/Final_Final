@@ -41,7 +41,12 @@ from stock_research_core.application.ai_tutor.guardrails import RuleBasedTutorGu
 from stock_research_core.application.ai_tutor.knowledge_ingestion import KnowledgeIngestionService
 from stock_research_core.application.ai_tutor.lesson_tutor import LessonTutorService
 from stock_research_core.application.ai_tutor.portfolio_tutor import PortfolioTutorService
-from stock_research_core.application.ai_tutor.ports import EmbeddingPort, KnowledgeChunkerPort, TutorModelPort
+from stock_research_core.application.ai_tutor.ports import (
+    EmbeddingPort,
+    KnowledgeChunkerPort,
+    KnowledgeSufficiencyGatePort,
+    TutorModelPort,
+)
 from stock_research_core.application.ai_tutor.prompt_builder import GroundedTutorPromptBuilder
 from stock_research_core.application.ai_tutor.retrieval import HybridKnowledgeRetriever
 from stock_research_core.application.ai_tutor.scenario_tutor import ScenarioTutorService
@@ -141,6 +146,10 @@ def get_chunker(request: Request) -> KnowledgeChunkerPort:
 
 def get_tutor_model(request: Request) -> TutorModelPort:
     return request.app.state.tutor_model
+
+
+def get_knowledge_sufficiency_gate(request: Request) -> KnowledgeSufficiencyGatePort:
+    return request.app.state.knowledge_sufficiency_gate
 
 
 def get_correlation_id(request: Request) -> str:
@@ -295,10 +304,12 @@ def get_ai_tutor_service(
     uow_factory: Annotated[Callable[[], UnitOfWorkPort], Depends(get_uow_factory)],
     retriever: Annotated[HybridKnowledgeRetriever, Depends(get_knowledge_retriever)],
     tutor_model: Annotated[TutorModelPort, Depends(get_tutor_model)],
+    sufficiency_gate: Annotated[KnowledgeSufficiencyGatePort, Depends(get_knowledge_sufficiency_gate)],
 ) -> GroundedAITutorService:
     return GroundedAITutorService(
         unit_of_work_factory=uow_factory, retriever=retriever, tutor_model=tutor_model,
         guardrail=RuleBasedTutorGuardrail(), prompt_builder=GroundedTutorPromptBuilder(),
+        sufficiency_gate=sufficiency_gate,
     )
 
 

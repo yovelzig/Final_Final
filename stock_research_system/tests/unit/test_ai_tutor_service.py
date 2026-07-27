@@ -17,9 +17,18 @@ from uuid import UUID, uuid4
 import pytest
 
 from stock_research_core.application.ai_tutor.guardrails import RuleBasedTutorGuardrail
-from stock_research_core.application.ai_tutor.models import RetrievalCandidate, TutorContext, TutorModelResult
+from stock_research_core.application.ai_tutor.models import (
+    KnowledgeSufficiencyDecision,
+    RetrievalCandidate,
+    TutorContext,
+    TutorModelResult,
+)
 from stock_research_core.application.ai_tutor.prompt_builder import GroundedTutorPromptBuilder
 from stock_research_core.application.ai_tutor.service import GroundedAITutorService
+from stock_research_core.application.ai_tutor.sufficiency import (
+    DisabledKnowledgeSufficiencyGate,
+    RuleBasedKnowledgeSufficiencyGate,
+)
 from stock_research_core.application.exceptions import (
     InactiveLearnerError,
     LearnerNotFoundError,
@@ -271,14 +280,62 @@ class FakeTutorModel:
         )
 
 
-def _build_service(uow_factory, *, candidates=None, model_result=None):
+class FakeSufficiencyGate:
+    """Test double for `KnowledgeSufficiencyGatePort`. Defaults to
+    reproducing `DisabledKnowledgeSufficiencyGate`'s legacy rule (empty
+    candidates -> insufficient/`NO_CANDIDATES`, non-empty -> sufficient)
+    unless a specific `decision` is supplied - lets most existing tests
+    ignore the gate entirely while it is still invoked exactly once, same
+    as production. `calls` records every `query` the gate was invoked
+    with, so tests can prove it ran (or didn't)."""
+
+    def __init__(self, decision: KnowledgeSufficiencyDecision | None = None) -> None:
+        self.decision = decision
+        self.calls: list[str] = []
+
+    def evaluate(self, *, query: str, candidates, context):
+        self.calls.append(query)
+        if self.decision is not None:
+            return self.decision
+        if not candidates:
+            return KnowledgeSufficiencyDecision(
+                sufficient=False, reason_codes=["NO_CANDIDATES"], policy_version="test-fake-gate-v1",
+            )
+        return KnowledgeSufficiencyDecision(
+            sufficient=True, reason_codes=["TEST_DEFAULT_SUFFICIENT"], policy_version="test-fake-gate-v1",
+        )
+
+
+class SpyPromptBuilder:
+    """Wraps the real `GroundedTutorPromptBuilder` to count `build()` calls -
+    proves an insufficient decision never reaches prompt construction."""
+
+    def __init__(self) -> None:
+        self._real = GroundedTutorPromptBuilder()
+        self.prompt_version = self._real.prompt_version
+        self.calls = 0
+
+    def build(self, **kwargs):
+        self.calls += 1
+        return self._real.build(**kwargs)
+
+
+def _build_service(uow_factory, *, candidates=None, model_result=None, sufficiency_gate=None, prompt_builder=None):
+    """Test-harness composition root. `GroundedAITutorService.sufficiency_gate`
+    is a required keyword with no constructor default - this helper is the
+    one place in this file that decides what a test gets when it doesn't
+    care (an explicit `FakeSufficiencyGate()` reproducing the legacy
+    disabled-gate rule), but the literal `GroundedAITutorService(...)` call
+    below always passes `sufficiency_gate=` explicitly, same as every
+    production composition root."""
     retriever = FakeRetriever(candidates)
     tutor_model = FakeTutorModel(model_result)
     guardrail = RuleBasedTutorGuardrail()
-    prompt_builder = GroundedTutorPromptBuilder()
+    builder = prompt_builder or GroundedTutorPromptBuilder()
+    gate = sufficiency_gate if sufficiency_gate is not None else FakeSufficiencyGate()
     service = GroundedAITutorService(
         unit_of_work_factory=uow_factory, retriever=retriever, tutor_model=tutor_model,
-        guardrail=guardrail, prompt_builder=prompt_builder, clock=lambda: NOW,
+        guardrail=guardrail, prompt_builder=builder, sufficiency_gate=gate, clock=lambda: NOW,
     )
     return service, retriever, tutor_model
 
@@ -434,6 +491,254 @@ class TestAsk:
         await service.close_conversation(conversation.conversation_id)
         with pytest.raises(TutorConversationNotActiveError):
             await service.ask(conversation_id=conversation.conversation_id, question="What is diversification?")
+
+
+@pytest.mark.asyncio
+class TestKnowledgeSufficiencyGateIntegration:
+    """Phase E1: `GroundedAITutorService.ask()` integration with the
+    Knowledge Sufficiency Gate. Most cases use `FakeSufficiencyGate` to
+    control the decision directly; the disabled/enabled/current-info
+    cases go through the real `DisabledKnowledgeSufficiencyGate` /
+    `RuleBasedKnowledgeSufficiencyGate` implementations to prove the
+    actual composed gates behave correctly end to end, not just this
+    file's own test double. The gate is now evaluated exactly once for
+    *every* retrieval result, including an empty candidate list - there
+    is no separate empty-candidate branch in the service."""
+
+    async def _create_conversation(self, service, learner, store):
+        context = TutorContext(context_type=TutorContextType.GENERAL_EDUCATION, learner_id=learner.learner_id)
+        return await service.create_conversation(learner_id=learner.learner_id, context=context)
+
+    async def test_insufficient_decision_never_calls_prompt_builder_or_model(self) -> None:
+        uow_factory, store = _make_uow_factory()
+        learner = _learner()
+        store["learners"][learner.learner_id] = learner
+        candidate = _candidate()
+        gate = FakeSufficiencyGate(
+            decision=KnowledgeSufficiencyDecision(
+                sufficient=False, reason_codes=["BELOW_RELEVANCE_THRESHOLDS"], policy_version="test-fake-gate-v1",
+            )
+        )
+        prompt_builder = SpyPromptBuilder()
+        service, retriever, tutor_model = _build_service(
+            uow_factory, candidates=[candidate], sufficiency_gate=gate, prompt_builder=prompt_builder,
+        )
+        conversation = await self._create_conversation(service, learner, store)
+
+        response = await service.ask(
+            conversation_id=conversation.conversation_id, question="What is diversification?"
+        )
+
+        assert prompt_builder.calls == 0
+        assert tutor_model.calls == 0
+        assert response.answer.status == TutorAnswerStatus.FALLBACK
+        assert response.answer.grounding_status == GroundingStatus.INSUFFICIENT_EVIDENCE
+        assert response.answer.answer_markdown == EXACT_INSUFFICIENT_EVIDENCE_FALLBACK
+        assert response.citations == []
+        assert gate.calls == ["What is diversification?"]
+        assert retriever.calls == ["What is diversification?"]
+        assert len(store["retrieval_runs"]) == 1
+        assert len(store["knowledge_gaps"]) == 1
+
+    async def test_sufficient_decision_still_follows_model_and_output_guardrail_path(self) -> None:
+        uow_factory, store = _make_uow_factory()
+        learner = _learner()
+        store["learners"][learner.learner_id] = learner
+        candidate = _candidate()
+        gate = FakeSufficiencyGate(
+            decision=KnowledgeSufficiencyDecision(
+                sufficient=True, reason_codes=["VECTOR_SCORE_SUFFICIENT"], policy_version="test-fake-gate-v1",
+            )
+        )
+        service, retriever, tutor_model = _build_service(uow_factory, candidates=[candidate], sufficiency_gate=gate)
+        conversation = await self._create_conversation(service, learner, store)
+
+        response = await service.ask(
+            conversation_id=conversation.conversation_id, question="What is diversification?"
+        )
+
+        assert response.answer.status == TutorAnswerStatus.VALIDATED
+        assert response.answer.grounding_status == GroundingStatus.GROUNDED
+        assert tutor_model.calls == 1
+        assert len(response.citations) == 1
+        assert gate.calls == ["What is diversification?"]
+
+    async def test_refuse_action_exits_before_retrieval_and_sufficiency_gate(self) -> None:
+        uow_factory, store = _make_uow_factory()
+        learner = _learner()
+        store["learners"][learner.learner_id] = learner
+        gate = FakeSufficiencyGate()
+        service, retriever, tutor_model = _build_service(
+            uow_factory, candidates=[_candidate()], sufficiency_gate=gate
+        )
+        conversation = await self._create_conversation(service, learner, store)
+
+        response = await service.ask(conversation_id=conversation.conversation_id, question="Should I buy NVDA?")
+
+        assert response.answer.status == TutorAnswerStatus.REJECTED
+        assert retriever.calls == []
+        assert gate.calls == []
+        assert tutor_model.calls == 0
+
+    async def test_input_fallback_action_exits_before_retrieval_and_sufficiency_gate(self) -> None:
+        uow_factory, store = _make_uow_factory()
+        learner = _learner()
+        store["learners"][learner.learner_id] = learner
+        gate = FakeSufficiencyGate()
+        service, retriever, tutor_model = _build_service(
+            uow_factory, candidates=[_candidate()], sufficiency_gate=gate
+        )
+        conversation = await self._create_conversation(service, learner, store)
+
+        response = await service.ask(
+            conversation_id=conversation.conversation_id,
+            question="Can you recommend a good pizza restaurant near me?",
+        )
+
+        assert response.answer.status == TutorAnswerStatus.FALLBACK
+        assert retriever.calls == []
+        assert gate.calls == []
+        assert tutor_model.calls == 0
+
+    async def test_empty_candidates_invoke_the_gate_exactly_once(self) -> None:
+        # No more separate empty-candidate branch in the service: the
+        # gate itself is the only thing that decides an empty retrieval
+        # is insufficient, and it must be consulted - exactly once.
+        uow_factory, store = _make_uow_factory()
+        learner = _learner()
+        store["learners"][learner.learner_id] = learner
+        gate = FakeSufficiencyGate()
+        service, retriever, tutor_model = _build_service(uow_factory, candidates=[], sufficiency_gate=gate)
+        conversation = await self._create_conversation(service, learner, store)
+
+        response = await service.ask(
+            conversation_id=conversation.conversation_id, question="What is diversification?"
+        )
+
+        assert gate.calls == ["What is diversification?"]
+        assert response.answer.status == TutorAnswerStatus.FALLBACK
+
+    async def test_empty_candidates_never_call_prompt_builder_or_model(self) -> None:
+        uow_factory, store = _make_uow_factory()
+        learner = _learner()
+        store["learners"][learner.learner_id] = learner
+        prompt_builder = SpyPromptBuilder()
+        service, retriever, tutor_model = _build_service(
+            uow_factory, candidates=[], prompt_builder=prompt_builder
+        )
+        conversation = await self._create_conversation(service, learner, store)
+
+        response = await service.ask(
+            conversation_id=conversation.conversation_id, question="What is diversification?"
+        )
+
+        assert prompt_builder.calls == 0
+        assert tutor_model.calls == 0
+        assert response.answer.status == TutorAnswerStatus.FALLBACK
+        assert response.answer.answer_markdown == EXACT_INSUFFICIENT_EVIDENCE_FALLBACK
+        assert response.citations == []
+        assert len(store["knowledge_gaps"]) == 1
+
+    async def test_real_disabled_gate_with_non_empty_candidates_preserves_existing_model_path(self) -> None:
+        # The real `DisabledKnowledgeSufficiencyGate` (not the test
+        # double) - production's own default composition - must let a
+        # non-empty candidate list reach the model exactly as before
+        # Phase E1.
+        uow_factory, store = _make_uow_factory()
+        learner = _learner()
+        store["learners"][learner.learner_id] = learner
+        candidate = _candidate()
+        service, retriever, tutor_model = _build_service(
+            uow_factory, candidates=[candidate], sufficiency_gate=DisabledKnowledgeSufficiencyGate()
+        )
+        conversation = await self._create_conversation(service, learner, store)
+
+        response = await service.ask(
+            conversation_id=conversation.conversation_id, question="What is diversification?"
+        )
+
+        assert response.answer.status == TutorAnswerStatus.VALIDATED
+        assert response.answer.grounding_status == GroundingStatus.GROUNDED
+        assert tutor_model.calls == 1
+        assert len(response.citations) == 1
+
+    async def test_real_disabled_gate_with_empty_candidates_falls_back(self) -> None:
+        uow_factory, store = _make_uow_factory()
+        learner = _learner()
+        store["learners"][learner.learner_id] = learner
+        service, retriever, tutor_model = _build_service(
+            uow_factory, candidates=[], sufficiency_gate=DisabledKnowledgeSufficiencyGate()
+        )
+        conversation = await self._create_conversation(service, learner, store)
+
+        response = await service.ask(
+            conversation_id=conversation.conversation_id, question="What is diversification?"
+        )
+
+        assert response.answer.status == TutorAnswerStatus.FALLBACK
+        assert tutor_model.calls == 0
+
+    async def test_real_enabled_gate_with_weak_candidates_skips_prompt_and_model(self) -> None:
+        # The real `RuleBasedKnowledgeSufficiencyGate`, calibrated
+        # thresholds, against a candidate scored below every threshold.
+        uow_factory, store = _make_uow_factory()
+        learner = _learner()
+        store["learners"][learner.learner_id] = learner
+        weak_candidate = _candidate()
+        weak_candidate = weak_candidate.model_copy(
+            update={"vector_score": 0.1, "lexical_score": 0.0, "metadata_score": 0.1}
+        )
+        prompt_builder = SpyPromptBuilder()
+        service, retriever, tutor_model = _build_service(
+            uow_factory,
+            candidates=[weak_candidate],
+            sufficiency_gate=RuleBasedKnowledgeSufficiencyGate(),
+            prompt_builder=prompt_builder,
+        )
+        conversation = await self._create_conversation(service, learner, store)
+
+        response = await service.ask(
+            conversation_id=conversation.conversation_id, question="What is diversification?"
+        )
+
+        assert prompt_builder.calls == 0
+        assert tutor_model.calls == 0
+        assert response.answer.status == TutorAnswerStatus.FALLBACK
+        assert response.answer.grounding_status == GroundingStatus.INSUFFICIENT_EVIDENCE
+        assert response.answer.answer_markdown == EXACT_INSUFFICIENT_EVIDENCE_FALLBACK
+        assert response.citations == []
+
+    async def test_real_enabled_gate_current_information_request_skips_prompt_and_model(self) -> None:
+        # Even a strongly-scored candidate must not save a current/live-
+        # information question - the classifier short-circuits before any
+        # score is consulted.
+        uow_factory, store = _make_uow_factory()
+        learner = _learner()
+        store["learners"][learner.learner_id] = learner
+        strong_candidate = _candidate()
+        strong_candidate = strong_candidate.model_copy(
+            update={"vector_score": 0.99, "lexical_score": 0.99, "metadata_score": 0.99}
+        )
+        prompt_builder = SpyPromptBuilder()
+        service, retriever, tutor_model = _build_service(
+            uow_factory,
+            candidates=[strong_candidate],
+            sufficiency_gate=RuleBasedKnowledgeSufficiencyGate(),
+            prompt_builder=prompt_builder,
+        )
+        conversation = await self._create_conversation(service, learner, store)
+
+        response = await service.ask(
+            conversation_id=conversation.conversation_id,
+            question="What is NVIDIA's current share price today?",
+        )
+
+        assert prompt_builder.calls == 0
+        assert tutor_model.calls == 0
+        assert response.answer.status == TutorAnswerStatus.FALLBACK
+        assert response.answer.grounding_status == GroundingStatus.INSUFFICIENT_EVIDENCE
+        assert response.answer.answer_markdown == EXACT_INSUFFICIENT_EVIDENCE_FALLBACK
+        assert response.citations == []
 
 
 @pytest.mark.asyncio
