@@ -150,6 +150,63 @@ class TestComposeS3EnvironmentVariables:
                 )
 
 
+_TUTOR_ENV_VAR_NAMES = (
+    "TUTOR_MODEL_PROVIDER",
+    "TUTOR_MODEL_BASE_URL",
+    "TUTOR_MODEL_API_KEY",
+    "TUTOR_MODEL_NAME",
+    "TUTOR_MODEL_TIMEOUT_SECONDS",
+    "TUTOR_MODEL_THINKING_LEVEL",
+)
+
+
+class TestComposeTutorModelEnvironmentVariables:
+    """Phase D: all six generic tutor-model settings must reach
+    `finquest-api` - the only service that constructs and calls the tutor
+    model - in both Compose files, defaulting to the safe `extractive`
+    provider with no key, and must not be added to any other service."""
+
+    @pytest.mark.parametrize("compose_name,compose_text", [("dev", _DEV_COMPOSE), ("production", _PRODUCTION_COMPOSE)])
+    def test_all_six_variables_present_on_finquest_api(self, compose_name: str, compose_text: str) -> None:
+        api_block = _service_block_in(compose_text, "finquest-api")
+        for var_name in _TUTOR_ENV_VAR_NAMES:
+            assert re.search(rf"(?m)^\s+{var_name}:", api_block), (
+                f"{var_name} missing from finquest-api in {compose_name} compose file"
+            )
+
+    @pytest.mark.parametrize("compose_name,compose_text", [("dev", _DEV_COMPOSE), ("production", _PRODUCTION_COMPOSE)])
+    def test_no_tutor_variable_present_on_other_services(self, compose_name: str, compose_text: str) -> None:
+        for service_name in _NON_API_SERVICE_NAMES:
+            block = _service_block_in(compose_text, service_name)
+            for var_name in _TUTOR_ENV_VAR_NAMES:
+                assert not re.search(rf"(?m)^\s+{var_name}:", block), (
+                    f"{var_name} unexpectedly present on {service_name} in {compose_name} compose file"
+                )
+
+    @pytest.mark.parametrize("compose_name,compose_text", [("dev", _DEV_COMPOSE), ("production", _PRODUCTION_COMPOSE)])
+    def test_provider_defaults_to_extractive(self, compose_name: str, compose_text: str) -> None:
+        api_block = _service_block_in(compose_text, "finquest-api")
+        match = re.search(r"(?m)^\s+TUTOR_MODEL_PROVIDER:\s*\$\{TUTOR_MODEL_PROVIDER:-(\S+)\}", api_block)
+        assert match is not None, f"TUTOR_MODEL_PROVIDER has no shell default in {compose_name} compose file"
+        assert match.group(1) == "extractive", (
+            f"TUTOR_MODEL_PROVIDER must default to extractive in {compose_name} compose file, "
+            f"found {match.group(1)!r}"
+        )
+
+    @pytest.mark.parametrize("compose_name,compose_text", [("dev", _DEV_COMPOSE), ("production", _PRODUCTION_COMPOSE)])
+    def test_api_key_has_no_real_secret_hardcoded(self, compose_name: str, compose_text: str) -> None:
+        """`TUTOR_MODEL_API_KEY` must resolve to an empty string unless the
+        operator sets a real key outside this committed file - never a
+        literal secret value baked into the shell-default fallback."""
+        api_block = _service_block_in(compose_text, "finquest-api")
+        match = re.search(r'(?m)^\s+TUTOR_MODEL_API_KEY:\s*"?\$\{TUTOR_MODEL_API_KEY:-([^}]*)\}"?', api_block)
+        assert match is not None, f"TUTOR_MODEL_API_KEY has no shell-default form in {compose_name} compose file"
+        assert match.group(1) == "", (
+            f"TUTOR_MODEL_API_KEY must default to empty in {compose_name} compose file, "
+            f"found a hardcoded default {match.group(1)!r}"
+        )
+
+
 class TestProductionComposeBuildTargets:
     def test_every_service_target_matches_the_expected_contract(self) -> None:
         for service_name, expected_target in _WORKER_TARGET_CONTRACT.items():
