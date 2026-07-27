@@ -193,9 +193,11 @@ class RecordingMetrics:
 class OkHandler:
     def __init__(self) -> None:
         self.calls = 0
+        self.last_context = None
 
-    async def handle(self, *, parameters, progress):
+    async def handle(self, *, context, parameters, progress):
         self.calls += 1
+        self.last_context = context
         await progress.report(current=1, total=1)
         return HandlerOutcome(result_summary={"ok": True})
 
@@ -205,7 +207,7 @@ class FailingHandler:
         self._exception_factory = exception_factory
         self.calls = 0
 
-    async def handle(self, *, parameters, progress):
+    async def handle(self, *, context, parameters, progress):
         self.calls += 1
         raise self._exception_factory()
 
@@ -226,7 +228,7 @@ class Harness:
                     FixedScheduleRetryPolicy(maximum_attempts=maximum_attempts, delays_seconds=(10, 30), retryable_exceptions=retryable_exceptions)
                     if retryable_exceptions else NeverRetryPolicy()
                 ),
-                time_limit_seconds=60, resource_key_builder=lambda p: None, allowed_trigger_sources=frozenset(JobTriggerSource),
+                time_limit_seconds=60, resource_key_builder=lambda context, p: None, allowed_trigger_sources=frozenset(JobTriggerSource),
             ))
         self.registry = BackgroundJobRegistry(entries)
         self.service = BackgroundJobService(
@@ -447,6 +449,54 @@ class TestExecuteJob:
         result = await harness.service.execute_job(job_id=created.job.job_id, worker_name="w2", celery_task_id="c2")
         assert result.status == BackgroundJobStatus.RUNNING
         assert "duplicate delivery" in result.warnings[0]
+
+
+class TestJobExecutionContext:
+    """Phase G2B: `create_job`/`execute_job` build a `JobExecutionContext`
+    from trusted data (never from `raw_parameters`) and pass it to the
+    handler and to `resource_key_builder`."""
+
+    @pytest.mark.asyncio
+    async def test_execution_context_carries_trusted_identity_and_attempt_number(self) -> None:
+        handler = OkHandler()
+        harness = Harness(handler=handler)
+        account_id = uuid4()
+        created = await harness.service.create_job(
+            job_type=BackgroundJobType.PORTFOLIO_VALUATION, raw_parameters=_valuation_params(),
+            idempotency_key="k1", trigger_source=JobTriggerSource.API, requested_by_account_id=account_id,
+            correlation_id="corr-1",
+        )
+        await harness.service.execute_job(job_id=created.job.job_id, worker_name="w1", celery_task_id="c1")
+
+        context = handler.last_context
+        assert context is not None
+        assert context.job_id == created.job.job_id
+        assert context.requested_by_account_id == account_id
+        assert context.requested_by_integration_id is None
+        assert context.idempotency_key == "k1"
+        assert context.attempt_number == 1
+        assert context.correlation_id == "corr-1"
+
+    @pytest.mark.asyncio
+    async def test_execution_context_attempt_number_increments_across_retries(self) -> None:
+        handler = FailingHandler(lambda: ConnectionError("transient"))
+        harness = Harness(handler=handler, maximum_attempts=3, retryable_exceptions=(ConnectionError,))
+        created = await harness.service.create_job(
+            job_type=BackgroundJobType.PORTFOLIO_VALUATION, raw_parameters=_valuation_params(),
+            idempotency_key="k1", trigger_source=JobTriggerSource.API,
+        )
+
+        contexts: list = []
+        original_handle = handler.handle
+
+        async def _recording_handle(*, context, parameters, progress):
+            contexts.append(context)
+            return await original_handle(context=context, parameters=parameters, progress=progress)
+
+        handler.handle = _recording_handle
+        await harness.service.execute_job(job_id=created.job.job_id, worker_name="w1", celery_task_id="c1")
+        await harness.service.execute_job(job_id=created.job.job_id, worker_name="w1", celery_task_id="c2")
+        assert [c.attempt_number for c in contexts] == [1, 2]
 
 
 class TestCancelAndRequeue:

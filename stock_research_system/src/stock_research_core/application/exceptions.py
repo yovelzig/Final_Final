@@ -506,3 +506,35 @@ class LiveResearchProviderConfigurationError(StockResearchError):
     setting, ...). Never a provider *request* failure - raised while
     constructing settings/adapters, before any network call would be
     attempted."""
+
+
+# -- Phase G2B: Live Research background-job orchestration -----------------------------------------------
+
+
+class LiveResearchJobProviderNotConfiguredError(StockResearchError):
+    """`LIVE_RESEARCH_RUN_EXECUTION` was invoked but a provider its scope
+    requires was not available - either the top-level orchestration
+    switch (`OperationsSettings.live_research_jobs_enabled`) is off, or
+    the specific G2A1 provider (Perplexity Search / SEC EDGAR) is not
+    enabled in its own settings. Raised before any provider call is
+    attempted; never a provider *request* failure."""
+
+
+class LiveResearchRequesterContextError(StockResearchError):
+    """A `LIVE_RESEARCH_RUN_EXECUTION` job was requested or executed
+    without exactly one trusted requester identity.
+
+    Raised in two places, deliberately not one: the admin CLI's
+    `--requested-by-account-id` XOR `--requested-by-integration-id`
+    resolution (which also covers an unparsable UUID string, so the CLI
+    prints a bounded error instead of a raw `ValueError` traceback), and
+    `LiveResearchRunExecutionJobHandler` itself, which re-checks its
+    `JobExecutionContext` because `SYSTEM`/`RETRY`-triggered and
+    programmatic callers reach the registered job type without going
+    through the CLI at all.
+
+    Never derived from job parameters - `LiveResearchRunExecutionParameters`
+    carries no requester field. Raised for missing or ambiguous
+    (both/neither) identity, always before a `ResearchRequest` or
+    `ResearchRun` exists; never retryable - the caller must supply
+    exactly one and resubmit."""

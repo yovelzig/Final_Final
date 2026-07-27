@@ -45,6 +45,16 @@ class OperationsSettings(BaseSettings):
     readiness_require_worker: bool = True
     readiness_require_redis: bool = True
 
+    #: Phase G2B: top-level switch for `LIVE_RESEARCH_RUN_EXECUTION`
+    #: orchestration - disabled by default. Independent of each G2A1
+    #: provider's own enabled flag (`PerplexitySearchSettings.
+    #: live_research_perplexity_enabled`, `SecEdgarSettings.
+    #: live_research_sec_enabled`): this gates whether the job's handler
+    #: is even given a chance to run any provider; those gate which
+    #: specific provider it is given. Never a duplicate of PERPLEXITY_*/
+    #: SEC_EDGAR_* configuration - those settings classes are reused as-is.
+    live_research_jobs_enabled: bool = False
+
     @property
     def resolved_celery_broker_url(self) -> str:
         return self.celery_broker_url or self.redis_url

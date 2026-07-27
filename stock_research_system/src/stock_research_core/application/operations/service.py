@@ -14,7 +14,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from pydantic import ValidationError
 
@@ -31,6 +31,7 @@ from stock_research_core.application.operations.locking import held_lock
 from stock_research_core.application.operations.models import JobCreationResult, JobExecutionResult
 from stock_research_core.application.operations.ports import (
     DistributedLockPort,
+    JobExecutionContext,
     JobQueuePort,
     MetricsPort,
     ProgressReporterPort,
@@ -149,7 +150,22 @@ class BackgroundJobService:
         except ValidationError as exc:
             raise InvalidJobParametersError(f"Invalid parameters for job type {job_type.value}: {exc}") from exc
 
-        resource_key = entry.resource_key_builder(parameters)
+        # Generated here, before `resource_key_builder` runs, so the same
+        # id is later persisted on the `BackgroundJob` row itself - the
+        # creation-time `JobExecutionContext` and the durable job always
+        # agree on `job_id`. `attempt_number=0`: no attempt has run yet.
+        job_id = uuid4()
+        creation_context = JobExecutionContext(
+            job_id=job_id,
+            job_type=job_type,
+            trigger_source=trigger_source,
+            requested_by_account_id=requested_by_account_id,
+            requested_by_integration_id=requested_by_integration_id,
+            idempotency_key=idempotency_key,
+            correlation_id=correlation_id,
+            attempt_number=0,
+        )
+        resource_key = entry.resource_key_builder(creation_context, parameters)
         resolved_available_at = available_at or self._clock()
 
         async with self._unit_of_work_factory() as uow:
@@ -164,6 +180,7 @@ class BackgroundJobService:
                 return JobCreationResult(job=existing, created=False, duplicate_of_job_id=existing.job_id)
 
             job = BackgroundJob(
+                job_id=job_id,
                 job_type=job_type,
                 status=BackgroundJobStatus.PENDING,
                 priority=priority,
@@ -285,11 +302,30 @@ class BackgroundJobService:
                     message=f"Attempt {attempt_number} started.",
                 )
             )
+            # `BackgroundJob` itself has no `correlation_id` column (see
+            # `JobExecutionContext`'s docstring) - the value `create_job`
+            # was given is only durable on the job's own `CREATED` event,
+            # so it is read back from there rather than adding a migration.
+            existing_events = await uow.background_job_events.list_for_job(job_id)
+            correlation_id = next(
+                (event.correlation_id for event in existing_events if event.event_type == JobEventType.CREATED),
+                None,
+            )
             await uow.commit()
 
         parameters = entry.parse_parameters(job.parameters)
         progress = _RepositoryProgressReporter(unit_of_work_factory=self._unit_of_work_factory, job_id=job_id)
         owner_id = f"{worker_name}:{celery_task_id}"
+        execution_context = JobExecutionContext(
+            job_id=job_id,
+            job_type=job.job_type,
+            trigger_source=job.trigger_source,
+            requested_by_account_id=job.requested_by_account_id,
+            requested_by_integration_id=job.requested_by_integration_id,
+            idempotency_key=job.idempotency_key,
+            correlation_id=correlation_id,
+            attempt_number=attempt_number,
+        )
 
         self._metrics.increment_counter("finquest_jobs_in_progress", labels={"job_type": job.job_type.value})
         try:
@@ -298,7 +334,9 @@ class BackgroundJobService:
             ):
                 async with held_lock(self._lock_port, key=job.resource_key, owner_id=owner_id, metrics=self._metrics):
                     with self._metrics.time_operation("finquest_job_duration_seconds", labels={"job_type": job.job_type.value}):
-                        outcome = await entry.handler.handle(parameters=parameters, progress=progress)
+                        outcome = await entry.handler.handle(
+                            context=execution_context, parameters=parameters, progress=progress
+                        )
         except LockAcquisitionError as exc:
             await self._record_lock_not_acquired(job_id=job_id, attempt=attempt)
             return await self._schedule_retry_or_fail(

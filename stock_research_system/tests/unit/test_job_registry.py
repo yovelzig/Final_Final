@@ -4,6 +4,13 @@ from __future__ import annotations
 
 import pytest
 
+from stock_research_core.application.exceptions import (
+    LiveResearchProviderAccessError,
+    LiveResearchProviderRateLimitError,
+    LiveResearchProviderResponseError,
+    LiveResearchProviderTimeoutError,
+    TransientInfrastructureError,
+)
 from stock_research_core.application.operations.job_registry import (
     _JOB_TYPE_CONFIG,
     BackgroundJobRegistry,
@@ -12,8 +19,11 @@ from stock_research_core.application.operations.job_registry import (
     JobRegistryEntry,
     NeverRetryPolicy,
     build_default_registry,
+    build_default_retry_policies,
 )
-from stock_research_core.application.operations.models import PortfolioValuationParameters
+from stock_research_core.application.operations.locking import live_research_job_resource_key
+from stock_research_core.application.operations.models import LiveResearchRunExecutionParameters, PortfolioValuationParameters
+from stock_research_core.application.operations.ports import JobExecutionContext
 from stock_research_core.domain.operations.enums import BackgroundJobType, JobTriggerSource
 
 
@@ -21,7 +31,7 @@ def _minimal_entry(job_type: BackgroundJobType, **overrides) -> JobRegistryEntry
     fields = dict(
         job_type=job_type, parameter_model=PortfolioValuationParameters, queue_name="finquest.default",
         task_name=f"finquest.{job_type.value.lower()}", handler=object(), maximum_attempts=3,
-        retry_policy=NeverRetryPolicy(), time_limit_seconds=60, resource_key_builder=lambda p: None,
+        retry_policy=NeverRetryPolicy(), time_limit_seconds=60, resource_key_builder=lambda context, p: None,
         allowed_trigger_sources=frozenset(JobTriggerSource),
     )
     fields.update(overrides)
@@ -98,6 +108,7 @@ class TestBuildDefaultRegistry:
         registry = build_default_registry(handlers)
         assert registry.all_queue_names() == {
             "finquest.default", "finquest.market", "finquest.portfolio", "finquest.knowledge", "finquest.evaluation",
+            "finquest.research",
         }
         entry = registry.get(BackgroundJobType.SYSTEM_MAINTENANCE)
         assert JobTriggerSource.API not in entry.allowed_trigger_sources
@@ -189,3 +200,67 @@ class TestNeverRetryPolicy:
         policy = NeverRetryPolicy()
         decision = policy.classify(RuntimeError("boom"), attempt_number=1)
         assert not decision.retryable
+
+
+class TestLiveResearchRunExecutionRegistration:
+    """Phase G2B: `LIVE_RESEARCH_RUN_EXECUTION` registration and its
+    retry policy, using the real `build_default_registry` wiring."""
+
+    def test_registered_on_a_dedicated_queue_with_the_approved_limits(self) -> None:
+        handlers = {job_type: object() for job_type in BackgroundJobType}
+        registry = build_default_registry(handlers)
+        entry = registry.get(BackgroundJobType.LIVE_RESEARCH_RUN_EXECUTION)
+        assert entry.queue_name == "finquest.research"
+        assert entry.time_limit_seconds == 180
+        assert entry.maximum_attempts == 4
+
+    def test_stage_zero_excludes_n8n_and_api(self) -> None:
+        handlers = {job_type: object() for job_type in BackgroundJobType}
+        registry = build_default_registry(handlers)
+        entry = registry.get(BackgroundJobType.LIVE_RESEARCH_RUN_EXECUTION)
+        assert JobTriggerSource.N8N not in entry.allowed_trigger_sources
+        assert JobTriggerSource.API not in entry.allowed_trigger_sources
+        assert JobTriggerSource.ADMIN_CLI in entry.allowed_trigger_sources
+        assert JobTriggerSource.SYSTEM in entry.allowed_trigger_sources
+        assert JobTriggerSource.RETRY in entry.allowed_trigger_sources
+
+    def test_resource_key_builder_delegates_to_live_research_job_resource_key(self) -> None:
+        handlers = {job_type: object() for job_type in BackgroundJobType}
+        registry = build_default_registry(handlers)
+        entry = registry.get(BackgroundJobType.LIVE_RESEARCH_RUN_EXECUTION)
+        context = JobExecutionContext(
+            job_id=__import__("uuid").uuid4(), job_type=BackgroundJobType.LIVE_RESEARCH_RUN_EXECUTION,
+            trigger_source=JobTriggerSource.ADMIN_CLI, requested_by_account_id=None,
+            requested_by_integration_id=None, idempotency_key="k1", correlation_id=None, attempt_number=0,
+        )
+        parameters = LiveResearchRunExecutionParameters(original_question="what is a bond?", scope="GENERAL_QUESTION")
+        assert entry.resource_key_builder(context, parameters) == live_research_job_resource_key(context)
+
+    def test_retry_policy_retries_only_the_documented_exceptions(self) -> None:
+        policies = build_default_retry_policies()
+        policy = policies[BackgroundJobType.LIVE_RESEARCH_RUN_EXECUTION]
+        for exc in (LiveResearchProviderTimeoutError("x"), LiveResearchProviderRateLimitError("x"), TransientInfrastructureError("x")):
+            assert policy.classify(exc, attempt_number=1).retryable, type(exc)
+        for exc in (LiveResearchProviderAccessError("x"), LiveResearchProviderResponseError("x"), ValueError("unlisted")):
+            assert not policy.classify(exc, attempt_number=1).retryable, type(exc)
+
+    def test_retry_schedule_matches_the_approved_delays(self) -> None:
+        policies = build_default_retry_policies()
+        policy = policies[BackgroundJobType.LIVE_RESEARCH_RUN_EXECUTION]
+        delays = [
+            policy.classify(LiveResearchProviderTimeoutError("x"), attempt_number=n).delay_seconds
+            for n in range(1, 4)
+        ]
+        assert delays == [30, 120, 600]
+        assert not policy.classify(LiveResearchProviderTimeoutError("x"), attempt_number=4).retryable
+
+    def test_existing_job_types_retain_their_own_retry_policy_and_config(self) -> None:
+        """Regression guard: adding LIVE_RESEARCH_RUN_EXECUTION must not
+        change any of the 13 pre-existing job types' queue/time-limit/
+        retry behavior."""
+        policies = build_default_retry_policies()
+        assert _JOB_TYPE_CONFIG[BackgroundJobType.SECURITY_MARKET_REFRESH] == (
+            "finquest.market", 300, 4, frozenset(JobTriggerSource)
+        )
+        assert _JOB_TYPE_CONFIG[BackgroundJobType.SYSTEM_MAINTENANCE][0] == "finquest.default"
+        assert isinstance(policies[BackgroundJobType.SYSTEM_MAINTENANCE], NeverRetryPolicy)
