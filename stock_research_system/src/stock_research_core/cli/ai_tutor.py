@@ -60,6 +60,10 @@ from stock_research_core.application.ai_tutor.prompt_builder import GroundedTuto
 from stock_research_core.application.ai_tutor.retrieval import HybridKnowledgeRetriever
 from stock_research_core.application.ai_tutor.scenario_tutor import ScenarioTutorService
 from stock_research_core.application.ai_tutor.service import GroundedAITutorService
+from stock_research_core.application.ai_tutor.sufficiency import (
+    DisabledKnowledgeSufficiencyGate,
+    RuleBasedKnowledgeSufficiencyGate,
+)
 from stock_research_core.application.exceptions import StockResearchError
 from stock_research_core.application.learning.service import LearningService
 from stock_research_core.application.market_scenarios.grading import RuleBasedScenarioGradingPolicy
@@ -72,7 +76,11 @@ from stock_research_core.application.virtual_portfolio.feedback import RuleBased
 from stock_research_core.application.virtual_portfolio.service import VirtualPortfolioService
 from stock_research_core.application.virtual_portfolio.valuation_service import PortfolioValuationService
 from stock_research_core.domain.ai_tutor.enums import TutorContextType
-from stock_research_core.infrastructure.ai_tutor.config import EmbeddingSettings, TutorModelSettings
+from stock_research_core.infrastructure.ai_tutor.config import (
+    EmbeddingSettings,
+    KnowledgeSufficiencySettings,
+    TutorModelSettings,
+)
 from stock_research_core.infrastructure.ai_tutor.deterministic_fake_embeddings import (
     DeterministicFakeEmbeddingAdapter,
 )
@@ -111,6 +119,16 @@ def _build_tutor_model(settings: TutorModelSettings) -> TutorModelPort:
             timeout_seconds=settings.tutor_model_timeout_seconds,
         )
     return DeterministicExtractiveTutor()
+
+
+def _build_knowledge_sufficiency_gate(settings: KnowledgeSufficiencySettings):
+    if not settings.tutor_knowledge_sufficiency_gate_enabled:
+        return DisabledKnowledgeSufficiencyGate()
+    return RuleBasedKnowledgeSufficiencyGate(
+        minimum_vector_score=settings.tutor_knowledge_sufficiency_min_vector_score,
+        minimum_lexical_score=settings.tutor_knowledge_sufficiency_min_lexical_score,
+        minimum_context_metadata_score=settings.tutor_knowledge_sufficiency_min_context_metadata_score,
+    )
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
@@ -168,6 +186,7 @@ async def _run(args: argparse.Namespace) -> int:
     settings = DatabaseSettings()
     embedding_settings = EmbeddingSettings()
     tutor_model_settings = TutorModelSettings()
+    knowledge_sufficiency_settings = KnowledgeSufficiencySettings()
     engine = create_database_engine(settings)
     tutor_model: TutorModelPort | None = None
     try:
@@ -179,9 +198,10 @@ async def _run(args: argparse.Namespace) -> int:
         tutor_model = _build_tutor_model(tutor_model_settings)
         guardrail = RuleBasedTutorGuardrail()
         prompt_builder = GroundedTutorPromptBuilder()
+        sufficiency_gate = _build_knowledge_sufficiency_gate(knowledge_sufficiency_settings)
         tutor_service = GroundedAITutorService(
             unit_of_work_factory=uow_factory, retriever=retriever, tutor_model=tutor_model,
-            guardrail=guardrail, prompt_builder=prompt_builder,
+            guardrail=guardrail, prompt_builder=prompt_builder, sufficiency_gate=sufficiency_gate,
         )
         lesson_service = LessonTutorService(tutor_service=tutor_service, unit_of_work_factory=uow_factory)
         scenario_service = ScenarioTutorService(

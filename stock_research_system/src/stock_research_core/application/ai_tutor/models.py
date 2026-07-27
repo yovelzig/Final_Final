@@ -14,7 +14,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from stock_research_core.domain.ai_tutor.enums import (
     KnowledgeApprovalStatus,
@@ -83,6 +83,48 @@ class RetrievalCandidate(DomainModel):
             raise ValueError("candidate chunk must belong to the supplied document")
         if self.document.source_id != self.source.source_id:
             raise ValueError("candidate document must belong to the supplied source")
+        return self
+
+
+class KnowledgeSufficiencyDecision(DomainModel):
+    """The Knowledge Sufficiency Gate's structured verdict for one query.
+
+    Phase E1: purely an internal signal `GroundedAITutorService` uses to
+    decide whether to build a prompt and call a `TutorModelPort` at all -
+    never exposed through the learner-facing `TutorResponse`.
+    """
+
+    sufficient: bool
+    reason_codes: list[str] = Field(default_factory=list)
+    best_vector_score: float | None = None
+    best_lexical_score: float | None = None
+    best_metadata_score: float | None = None
+    policy_version: str = Field(min_length=1, max_length=50)
+
+    @field_validator("reason_codes")
+    @classmethod
+    def _validate_reason_codes(cls, value: list[str]) -> list[str]:
+        if len(set(value)) != len(value):
+            raise ValueError("reason_codes must not contain duplicates")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_scores(self) -> KnowledgeSufficiencyDecision:
+        if self.best_vector_score is not None:
+            if not _is_finite(self.best_vector_score):
+                raise ValueError("best_vector_score must be finite")
+            if not (-1.0 <= self.best_vector_score <= 1.0):
+                raise ValueError("best_vector_score must be within [-1.0, 1.0]")
+        if self.best_lexical_score is not None:
+            if not _is_finite(self.best_lexical_score):
+                raise ValueError("best_lexical_score must be finite")
+            if self.best_lexical_score < 0:
+                raise ValueError("best_lexical_score must be non-negative")
+        if self.best_metadata_score is not None:
+            if not _is_finite(self.best_metadata_score):
+                raise ValueError("best_metadata_score must be finite")
+            if not (0.0 <= self.best_metadata_score <= 1.0):
+                raise ValueError("best_metadata_score must be within [0.0, 1.0]")
         return self
 
 

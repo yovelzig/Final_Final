@@ -22,6 +22,7 @@ from stock_research_core.application.ai_tutor.ports import EmbeddingPort, Knowle
 from stock_research_core.application.ai_tutor.prompt_builder import PROMPT_VERSION, GroundedTutorPromptBuilder
 from stock_research_core.application.ai_tutor.retrieval import HYBRID_RETRIEVAL_VERSION, HybridKnowledgeRetriever
 from stock_research_core.application.ai_tutor.service import TUTOR_POLICY_VERSION, GroundedAITutorService
+from stock_research_core.application.ai_tutor.sufficiency import DisabledKnowledgeSufficiencyGate
 from stock_research_core.application.market_data.service import MarketDataIngestionService
 from stock_research_core.application.operations.handlers import (
     CurriculumKnowledgeRefreshJobHandler,
@@ -102,6 +103,9 @@ def build_quality_evaluation_service(
     tutor_service_for_evaluation = GroundedAITutorService(
         unit_of_work_factory=unit_of_work_factory, retriever=retriever, tutor_model=DeterministicExtractiveTutor(),
         guardrail=guardrail, prompt_builder=GroundedTutorPromptBuilder(),
+        # Quality evaluation exercises the full generate/validate pipeline
+        # independent of the (opt-in, learner-facing) Phase E1 gate.
+        sufficiency_gate=DisabledKnowledgeSufficiencyGate(),
     )
     learning_quality_calculator = NotYetImplementedLearningQualityCalculator()
     service = QualityEvaluationService(

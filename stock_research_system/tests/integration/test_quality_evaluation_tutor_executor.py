@@ -21,6 +21,7 @@ from stock_research_core.application.ai_tutor.knowledge_ingestion import Knowled
 from stock_research_core.application.ai_tutor.prompt_builder import GroundedTutorPromptBuilder
 from stock_research_core.application.ai_tutor.retrieval import HybridKnowledgeRetriever
 from stock_research_core.application.ai_tutor.service import GroundedAITutorService
+from stock_research_core.application.ai_tutor.sufficiency import DisabledKnowledgeSufficiencyGate
 from stock_research_core.application.quality_evaluation.models import EvaluationCaseExecutionInput
 from stock_research_core.domain.ai_tutor.enums import KnowledgeApprovalStatus, TutorRequestCategory
 from stock_research_core.domain.learning.models import LearnerProfile
@@ -59,6 +60,7 @@ async def test_general_rag_case_executes_through_the_real_tutor_pipeline(uow_fac
     tutor_service = GroundedAITutorService(
         unit_of_work_factory=uow_factory, retriever=retriever, tutor_model=DeterministicExtractiveTutor(),
         guardrail=RuleBasedTutorGuardrail(), prompt_builder=GroundedTutorPromptBuilder(),
+        sufficiency_gate=DisabledKnowledgeSufficiencyGate(),
     )
     async with uow_factory() as uow:
         eval_learner = await uow.learners.create(LearnerProfile(display_name="Quality Evaluation Fixture Learner"))
@@ -92,6 +94,7 @@ async def test_refusal_case_is_observed_correctly(uow_factory) -> None:
     tutor_service = GroundedAITutorService(
         unit_of_work_factory=uow_factory, retriever=retriever, tutor_model=DeterministicExtractiveTutor(),
         guardrail=RuleBasedTutorGuardrail(), prompt_builder=GroundedTutorPromptBuilder(),
+        sufficiency_gate=DisabledKnowledgeSufficiencyGate(),
     )
     async with uow_factory() as uow:
         eval_learner = await uow.learners.create(LearnerProfile(display_name="Quality Evaluation Fixture Learner 2"))

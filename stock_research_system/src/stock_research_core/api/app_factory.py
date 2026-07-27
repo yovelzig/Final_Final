@@ -50,11 +50,15 @@ from stock_research_core.application.ai_tutor.chunking import HeadingAwareWordCh
 from stock_research_core.application.ai_tutor.guardrails import RuleBasedTutorGuardrail
 from stock_research_core.application.ai_tutor.lesson_tutor import LessonTutorService
 from stock_research_core.application.ai_tutor.portfolio_tutor import PortfolioTutorService
-from stock_research_core.application.ai_tutor.ports import TutorModelPort
+from stock_research_core.application.ai_tutor.ports import KnowledgeSufficiencyGatePort, TutorModelPort
 from stock_research_core.application.ai_tutor.prompt_builder import GroundedTutorPromptBuilder
 from stock_research_core.application.ai_tutor.retrieval import HybridKnowledgeRetriever
 from stock_research_core.application.ai_tutor.scenario_tutor import ScenarioTutorService
 from stock_research_core.application.ai_tutor.service import GroundedAITutorService
+from stock_research_core.application.ai_tutor.sufficiency import (
+    DisabledKnowledgeSufficiencyGate,
+    RuleBasedKnowledgeSufficiencyGate,
+)
 from stock_research_core.application.learning.service import LearningService
 from stock_research_core.application.learning_orchestrator.actions import AllowlistedLearningActionExecutor
 from stock_research_core.application.learning_orchestrator.graph_builder import build_graph
@@ -73,7 +77,11 @@ from stock_research_core.application.virtual_portfolio.execution import (
 from stock_research_core.application.virtual_portfolio.feedback import RuleBasedPortfolioFeedbackPolicy
 from stock_research_core.application.virtual_portfolio.service import VirtualPortfolioService
 from stock_research_core.application.virtual_portfolio.valuation_service import PortfolioValuationService
-from stock_research_core.infrastructure.ai_tutor.config import EmbeddingSettings, TutorModelSettings
+from stock_research_core.infrastructure.ai_tutor.config import (
+    EmbeddingSettings,
+    KnowledgeSufficiencySettings,
+    TutorModelSettings,
+)
 from stock_research_core.infrastructure.ai_tutor.deterministic_fake_embeddings import (
     DeterministicFakeEmbeddingAdapter,
 )
@@ -153,6 +161,24 @@ def _build_tutor_model(settings: TutorModelSettings) -> TutorModelPort:
     raise ValueError(f"Unsupported tutor_model_provider {settings.tutor_model_provider!r}")
 
 
+def _build_knowledge_sufficiency_gate(
+    settings: KnowledgeSufficiencySettings,
+) -> KnowledgeSufficiencyGatePort:
+    """The one place the enabled/disabled choice is made - Phase E1's
+    `TUTOR_KNOWLEDGE_SUFFICIENCY_GATE_ENABLED=false` default (and
+    production's current value) means this always returns the explicit
+    `DisabledKnowledgeSufficiencyGate`, so deploying this feature's
+    code alone never changes `GroundedAITutorService`'s existing
+    behavior."""
+    if not settings.tutor_knowledge_sufficiency_gate_enabled:
+        return DisabledKnowledgeSufficiencyGate()
+    return RuleBasedKnowledgeSufficiencyGate(
+        minimum_vector_score=settings.tutor_knowledge_sufficiency_min_vector_score,
+        minimum_lexical_score=settings.tutor_knowledge_sufficiency_min_lexical_score,
+        minimum_context_metadata_score=settings.tutor_knowledge_sufficiency_min_context_metadata_score,
+    )
+
+
 async def _close_tutor_model(tutor_model: TutorModelPort) -> None:
     """Closes an HTTP-backed tutor adapter's own client on shutdown.
 
@@ -172,6 +198,7 @@ def create_app(
     database_settings: DatabaseSettings | None = None,
     embedding_settings: EmbeddingSettings | None = None,
     tutor_model_settings: TutorModelSettings | None = None,
+    knowledge_sufficiency_settings: KnowledgeSufficiencySettings | None = None,
     operations_settings: OperationsSettings | None = None,
     proxy_settings: ProxySettings | None = None,
     learning_orchestrator_settings: LangGraphSettings | None = None,
@@ -182,6 +209,7 @@ def create_app(
     database_settings = database_settings or DatabaseSettings()
     embedding_settings = embedding_settings or EmbeddingSettings()
     tutor_model_settings = tutor_model_settings or TutorModelSettings()
+    knowledge_sufficiency_settings = knowledge_sufficiency_settings or KnowledgeSufficiencySettings()
     operations_settings = operations_settings or OperationsSettings()
     learning_orchestrator_settings = learning_orchestrator_settings or LangGraphSettings()
     proxy_settings = proxy_settings or ProxySettings()
@@ -225,6 +253,8 @@ def create_app(
         app.state.embedding_provider = _build_embedding_provider(embedding_settings)
         app.state.chunker = HeadingAwareWordChunker()
         app.state.tutor_model = _build_tutor_model(tutor_model_settings)
+        app.state.knowledge_sufficiency_settings = knowledge_sufficiency_settings
+        app.state.knowledge_sufficiency_gate = _build_knowledge_sufficiency_gate(knowledge_sufficiency_settings)
 
         # Phase 11: background jobs. `redis.asyncio.from_url()` and
         # `Celery.send_task`/`control.inspect` are lazy - constructing
@@ -292,6 +322,7 @@ def create_app(
                 retriever=retriever,
                 tutor_model=app.state.tutor_model, guardrail=RuleBasedTutorGuardrail(),
                 prompt_builder=GroundedTutorPromptBuilder(),
+                sufficiency_gate=app.state.knowledge_sufficiency_gate,
             )
             lesson_tutor_service = LessonTutorService(
                 tutor_service=tutor_service, unit_of_work_factory=app.state.uow_factory

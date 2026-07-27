@@ -23,6 +23,7 @@ from stock_research_core.application.ai_tutor.models import TutorContext
 from stock_research_core.application.ai_tutor.prompt_builder import GroundedTutorPromptBuilder
 from stock_research_core.application.ai_tutor.retrieval import HybridKnowledgeRetriever
 from stock_research_core.application.ai_tutor.service import GroundedAITutorService
+from stock_research_core.application.ai_tutor.sufficiency import DisabledKnowledgeSufficiencyGate
 from stock_research_core.domain.ai_tutor.enums import (
     GroundingStatus,
     KnowledgeApprovalStatus,
@@ -72,6 +73,7 @@ async def test_full_tutor_conversation_flow(uow_factory, diversification_note: P
     tutor_service = GroundedAITutorService(
         unit_of_work_factory=uow_factory, retriever=retriever, tutor_model=DeterministicExtractiveTutor(),
         guardrail=RuleBasedTutorGuardrail(), prompt_builder=GroundedTutorPromptBuilder(),
+        sufficiency_gate=DisabledKnowledgeSufficiencyGate(),
     )
 
     learner = LearnerProfile(display_name="E2E Test Learner")

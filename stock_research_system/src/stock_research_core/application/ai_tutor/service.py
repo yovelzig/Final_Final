@@ -32,6 +32,7 @@ from stock_research_core.application.ai_tutor.models import (
 )
 from stock_research_core.application.ai_tutor.ports import (
     KnowledgeRetrieverPort,
+    KnowledgeSufficiencyGatePort,
     TutorGuardrailPort,
     TutorModelPort,
     TutorPromptBuilderPort,
@@ -84,6 +85,7 @@ class GroundedAITutorService:
         tutor_model: TutorModelPort,
         guardrail: TutorGuardrailPort,
         prompt_builder: TutorPromptBuilderPort,
+        sufficiency_gate: KnowledgeSufficiencyGatePort,
         clock: Clock = utc_now,
         history_message_limit: int = DEFAULT_HISTORY_MESSAGE_LIMIT,
         history_character_budget: int = DEFAULT_HISTORY_CHARACTER_BUDGET,
@@ -93,6 +95,12 @@ class GroundedAITutorService:
         self._tutor_model = tutor_model
         self._guardrail = guardrail
         self._prompt_builder = prompt_builder
+        # Phase E1: required, explicit at every call site - composition
+        # always chooses (`RuleBasedKnowledgeSufficiencyGate` when
+        # enabled, `DisabledKnowledgeSufficiencyGate` otherwise/by
+        # default). No silent fallback here: every construction site
+        # must decide and pass this keyword itself.
+        self._sufficiency_gate = sufficiency_gate
         self._clock = clock
         self._history_message_limit = history_message_limit
         self._history_character_budget = history_character_budget
@@ -186,7 +194,21 @@ class GroundedAITutorService:
         async with self._unit_of_work_factory() as uow:
             saved_run = await uow.tutor_retrieval.save_run(retrieval_run, candidates)
 
-            if not candidates:
+            # Phase E1: Knowledge Sufficiency Gate - a distinct checkpoint
+            # from the guardrail above, evaluated exactly once for every
+            # retrieval result (including an empty candidate list - there
+            # is no separate empty-candidate branch here; the composed
+            # gate itself decides that case, e.g.
+            # `DisabledKnowledgeSufficiencyGate` reproduces the legacy
+            # "empty candidates -> fallback" rule directly). Runs after
+            # retrieval is saved but before any prompt is built or model
+            # is called, closing the gap where a weak/unrelated but
+            # non-empty candidate list would otherwise still reach the
+            # model.
+            sufficiency_decision = self._sufficiency_gate.evaluate(
+                query=question, candidates=candidates, context=effective_context
+            )
+            if not sufficiency_decision.sufficient:
                 response = await self._finalize_fallback(
                     uow, conversation, user_message, saved_decision, effective_context,
                     retrieval_run_id=saved_run.retrieval_run_id,

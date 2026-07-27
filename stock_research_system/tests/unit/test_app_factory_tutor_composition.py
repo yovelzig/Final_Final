@@ -11,8 +11,16 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from stock_research_core.api.app_factory import _build_tutor_model, _close_tutor_model
-from stock_research_core.infrastructure.ai_tutor.config import TutorModelSettings
+from stock_research_core.api.app_factory import (
+    _build_knowledge_sufficiency_gate,
+    _build_tutor_model,
+    _close_tutor_model,
+)
+from stock_research_core.application.ai_tutor.sufficiency import (
+    DisabledKnowledgeSufficiencyGate,
+    RuleBasedKnowledgeSufficiencyGate,
+)
+from stock_research_core.infrastructure.ai_tutor.config import KnowledgeSufficiencySettings, TutorModelSettings
 from stock_research_core.infrastructure.ai_tutor.extractive_tutor import DeterministicExtractiveTutor
 from stock_research_core.infrastructure.ai_tutor.ollama_cloud_tutor import OllamaCloudTutorAdapter
 from stock_research_core.infrastructure.ai_tutor.openai_compatible_tutor import OpenAICompatibleTutorAdapter
@@ -143,3 +151,42 @@ class TestTutorModelLifespanClose:
         # DeterministicExtractiveTutor owns no HTTP client - closing it must
         # be a safe no-op, never an AttributeError from a missing aclose().
         await _close_tutor_model(DeterministicExtractiveTutor())
+
+
+class TestKnowledgeSufficiencyGateComposition:
+    """Unit tests for `app_factory._build_knowledge_sufficiency_gate`
+    (Phase E1). Mirrors `TestProviderDispatch` above: the enabled/disabled
+    choice is made once, here, in composition - never as a scattered flag
+    check inside `GroundedAITutorService`."""
+
+    def test_default_settings_build_disabled_gate(self) -> None:
+        gate = _build_knowledge_sufficiency_gate(KnowledgeSufficiencySettings(_env_file=None))
+        assert isinstance(gate, DisabledKnowledgeSufficiencyGate)
+
+    def test_explicitly_disabled_builds_disabled_gate(self) -> None:
+        gate = _build_knowledge_sufficiency_gate(
+            KnowledgeSufficiencySettings(_env_file=None, tutor_knowledge_sufficiency_gate_enabled=False)
+        )
+        assert isinstance(gate, DisabledKnowledgeSufficiencyGate)
+
+    def test_enabled_builds_rule_based_gate_with_configured_thresholds(self) -> None:
+        settings = KnowledgeSufficiencySettings(
+            _env_file=None,
+            tutor_knowledge_sufficiency_gate_enabled=True,
+            tutor_knowledge_sufficiency_min_vector_score=0.6,
+            tutor_knowledge_sufficiency_min_lexical_score=0.1,
+            tutor_knowledge_sufficiency_min_context_metadata_score=0.8,
+        )
+        gate = _build_knowledge_sufficiency_gate(settings)
+        assert isinstance(gate, RuleBasedKnowledgeSufficiencyGate)
+        assert gate._minimum_vector_score == 0.6  # noqa: SLF001 - test-only introspection
+        assert gate._minimum_lexical_score == 0.1  # noqa: SLF001
+        assert gate._minimum_context_metadata_score == 0.8  # noqa: SLF001
+
+    def test_enabled_gate_uses_calibrated_defaults_when_not_overridden(self) -> None:
+        settings = KnowledgeSufficiencySettings(_env_file=None, tutor_knowledge_sufficiency_gate_enabled=True)
+        gate = _build_knowledge_sufficiency_gate(settings)
+        assert isinstance(gate, RuleBasedKnowledgeSufficiencyGate)
+        assert gate._minimum_vector_score == 0.52  # noqa: SLF001
+        assert gate._minimum_lexical_score == 0.05  # noqa: SLF001
+        assert gate._minimum_context_metadata_score == 0.90  # noqa: SLF001
