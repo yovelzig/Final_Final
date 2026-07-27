@@ -28,9 +28,10 @@ from stock_research_core.application.operations.models import (
     QualityBaselineComparisonParameters,
     RagasQualityEvaluationParameters,
 )
+from stock_research_core.application.operations.ports import JobExecutionContext
 from stock_research_core.application.quality_evaluation.models import EvaluationCaseExecutionResult, EvaluationConfiguration
 from stock_research_core.application.quality_evaluation.service import QualityEvaluationService
-from stock_research_core.domain.operations.enums import BackgroundJobType
+from stock_research_core.domain.operations.enums import BackgroundJobType, JobTriggerSource
 from stock_research_core.domain.quality_evaluation.enums import (
     EvaluationCaseContextType,
     LearningOutcomeMetricType,
@@ -47,6 +48,16 @@ from stock_research_core.infrastructure.quality_evaluation.learning_quality_calc
 pytestmark = pytest.mark.integration
 
 VALID_HASH = hashlib.sha256(b"fixture").hexdigest()
+
+
+def _context(job_type: BackgroundJobType) -> JobExecutionContext:
+    """A minimal `JobExecutionContext` for tests that call a handler's
+    `handle()` directly, bypassing `BackgroundJobService.execute_job`."""
+    return JobExecutionContext(
+        job_id=uuid4(), job_type=job_type, trigger_source=JobTriggerSource.API,
+        requested_by_account_id=None, requested_by_integration_id=None,
+        idempotency_key=f"test-{uuid4()}", correlation_id=None, attempt_number=1,
+    )
 
 
 class _NoopMetrics:
@@ -150,7 +161,9 @@ async def test_ragas_quality_evaluation_job_handler_creates_and_executes_a_run(u
     handler = RagasQualityEvaluationJobHandler(quality_evaluation_service=service, default_configuration=_configuration())
     parameters = RagasQualityEvaluationParameters(suite_id=approved_suite.suite_id, mode="DETERMINISTIC")
 
-    result = await handler.handle(parameters=parameters, progress=_NoopProgress())
+    result = await handler.handle(
+        context=_context(BackgroundJobType.RAGAS_QUALITY_EVALUATION), parameters=parameters, progress=_NoopProgress()
+    )
     assert result.result_summary["completed_case_count"] == 1
     assert "run_id" in result.result_summary
 
@@ -209,7 +222,9 @@ async def test_quality_baseline_comparison_job_handler_delegates_to_the_service(
 
     handler = QualityBaselineComparisonJobHandler(quality_evaluation_service=service)
     parameters = QualityBaselineComparisonParameters(run_id=second_run.run_id, baseline_id=baseline.baseline_id)
-    outcome = await handler.handle(parameters=parameters, progress=_NoopProgress())
+    outcome = await handler.handle(
+        context=_context(BackgroundJobType.QUALITY_BASELINE_COMPARISON), parameters=parameters, progress=_NoopProgress()
+    )
     assert outcome.result_summary["comparable"] is True
 
 
@@ -224,4 +239,6 @@ async def test_learning_quality_aggregation_job_handler_fails_loudly_when_data_n
         metric_types=[LearningOutcomeMetricType.LESSON_COMPLETION_RATE.value],
     )
     with pytest.raises(LearningQualityDataNotAvailableError):
-        await handler.handle(parameters=parameters, progress=_NoopProgress())
+        await handler.handle(
+            context=_context(BackgroundJobType.LEARNING_QUALITY_AGGREGATION), parameters=parameters, progress=_NoopProgress()
+        )

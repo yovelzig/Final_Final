@@ -311,5 +311,51 @@ services:
       retries: 5
       start_period: 20s
 
+  finquest-worker-research:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # base is sufficient: LIVE_RESEARCH_RUN_EXECUTION calls Perplexity
+      # Search / SEC EDGAR over plain HTTP - no embedding/model dependency.
+      target: base
+    container_name: finquest-worker-research
+    restart: unless-stopped
+    networks: [finquest-net]
+    depends_on:
+      stock-db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      <<: *worker-env
+      # Phase G2B: disabled by default. Flipping this alone still requires
+      # each provider's own G2A1 flag (LIVE_RESEARCH_PERPLEXITY_ENABLED /
+      # LIVE_RESEARCH_SEC_ENABLED) to actually construct an adapter.
+      LIVE_RESEARCH_JOBS_ENABLED: ${LIVE_RESEARCH_JOBS_ENABLED:-false}
+      LIVE_RESEARCH_PERPLEXITY_ENABLED: ${LIVE_RESEARCH_PERPLEXITY_ENABLED:-false}
+      LIVE_RESEARCH_PERPLEXITY_API_KEY: "${LIVE_RESEARCH_PERPLEXITY_API_KEY:-}"
+      LIVE_RESEARCH_PERPLEXITY_BASE_URL: ${LIVE_RESEARCH_PERPLEXITY_BASE_URL:-https://api.perplexity.ai}
+      LIVE_RESEARCH_PERPLEXITY_TIMEOUT_SECONDS: ${LIVE_RESEARCH_PERPLEXITY_TIMEOUT_SECONDS:-30.0}
+      LIVE_RESEARCH_PERPLEXITY_MAX_RESULTS: ${LIVE_RESEARCH_PERPLEXITY_MAX_RESULTS:-10}
+      LIVE_RESEARCH_PERPLEXITY_MAX_TOKENS: ${LIVE_RESEARCH_PERPLEXITY_MAX_TOKENS:-10000}
+      LIVE_RESEARCH_PERPLEXITY_MAX_TOKENS_PER_PAGE: ${LIVE_RESEARCH_PERPLEXITY_MAX_TOKENS_PER_PAGE:-4096}
+      LIVE_RESEARCH_SEC_ENABLED: ${LIVE_RESEARCH_SEC_ENABLED:-false}
+      LIVE_RESEARCH_SEC_USER_AGENT: "${LIVE_RESEARCH_SEC_USER_AGENT:-}"
+      LIVE_RESEARCH_SEC_BASE_URL: ${LIVE_RESEARCH_SEC_BASE_URL:-https://data.sec.gov}
+      LIVE_RESEARCH_SEC_TIMEOUT_SECONDS: ${LIVE_RESEARCH_SEC_TIMEOUT_SECONDS:-30.0}
+      LIVE_RESEARCH_SEC_REQUESTS_PER_SECOND: ${LIVE_RESEARCH_SEC_REQUESTS_PER_SECOND:-5.0}
+    # Low bounded concurrency: each task makes outbound Perplexity Search /
+    # SEC EDGAR calls - I/O-bound and rate-sensitive against those
+    # upstream providers, same shape as finquest-worker-market.
+    command: >
+      celery -A stock_research_core.infrastructure.operations.celery_tasks worker
+      --loglevel=info -Q finquest.research --concurrency=2 -n worker-research@%h
+    healthcheck:
+      test: ["CMD", "python", "-m", "stock_research_core.cli.worker_status"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 20s
+
 volumes:
   stock_db_data:

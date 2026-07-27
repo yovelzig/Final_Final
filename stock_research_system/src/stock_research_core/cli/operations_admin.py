@@ -24,6 +24,15 @@ arbitrary Python expression):
       --parameters-file ".\\job-parameters.json" `
       --idempotency-key "manual-refresh-2026-07-20"
 
+LIVE_RESEARCH_RUN_EXECUTION requires exactly one trusted requester
+identity, passed outside the parameters file - never inside it:
+
+    python -m stock_research_core.cli.operations_admin `
+      --create-job LIVE_RESEARCH_RUN_EXECUTION `
+      --parameters-file ".\\live-research-parameters.json" `
+      --idempotency-key "manual-research-2026-07-27" `
+      --requested-by-account-id "11111111-1111-1111-1111-111111111111"
+
 Job status / requeue:
 
     python -m stock_research_core.cli.operations_admin --job-status <UUID>
@@ -43,7 +52,7 @@ import sys
 from uuid import UUID
 
 from stock_research_core.application.ai_tutor.chunking import HeadingAwareWordChunker
-from stock_research_core.application.exceptions import StockResearchError
+from stock_research_core.application.exceptions import LiveResearchRequesterContextError, StockResearchError
 from stock_research_core.application.operations.service import BackgroundJobService
 from stock_research_core.domain.ai_tutor.enums import KnowledgeApprovalStatus  # noqa: F401 - re-exported for parameters-file authors
 from stock_research_core.domain.models import utc_now
@@ -101,6 +110,21 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--priority", default=BackgroundJobPriority.NORMAL.value, choices=[p.value for p in BackgroundJobPriority]
     )
+    # Trusted requester identity, passed to BackgroundJobService.create_job
+    # as an authenticated keyword argument - never placed inside
+    # --parameters-file's raw JSON. Required (exactly one) for
+    # LIVE_RESEARCH_RUN_EXECUTION specifically; optional for other job
+    # types, matching create_job's existing generic support for both.
+    parser.add_argument(
+        "--requested-by-account-id", default=None, metavar="UUID",
+        help="Trusted requester identity (account). Exactly one of this or "
+        "--requested-by-integration-id is required for LIVE_RESEARCH_RUN_EXECUTION.",
+    )
+    parser.add_argument(
+        "--requested-by-integration-id", default=None, metavar="UUID",
+        help="Trusted requester identity (integration client). Exactly one of "
+        "this or --requested-by-account-id is required for LIVE_RESEARCH_RUN_EXECUTION.",
+    )
     return parser
 
 
@@ -137,12 +161,58 @@ async def _revoke_integration_client(uow_factory, *, integration_id: str) -> Non
     print(f"Revoked integration client: {updated.integration_id} <{updated.name}>")
 
 
+def _parse_requester_uuid(raw_value: str | None, *, option: str) -> UUID | None:
+    if not raw_value:
+        return None
+    try:
+        return UUID(raw_value)
+    except ValueError as exc:
+        raise LiveResearchRequesterContextError(
+            f"{option} must be a valid UUID (got an unparsable value of {len(raw_value)} character(s))."
+        ) from exc
+
+
+def _resolve_requester_identity(
+    *, job_type: str, requested_by_account_id: str | None, requested_by_integration_id: str | None,
+) -> tuple[UUID | None, UUID | None]:
+    """Parses the CLI's own `--requested-by-account-id`/
+    `--requested-by-integration-id` options into trusted UUIDs - never
+    read from `--parameters-file`'s JSON, which is untrusted job-parameter
+    content. `LIVE_RESEARCH_RUN_EXECUTION` requires exactly one; every
+    other job type accepts zero, one, or (as already supported by
+    `create_job`) either, with no additional constraint here.
+
+    An unparsable UUID is re-raised as `LiveResearchRequesterContextError`
+    (G2B Correction V3, item 7) so `_run`'s existing `StockResearchError`
+    boundary prints a bounded `error: ...` line, rather than letting
+    `UUID`'s own `ValueError` escape as a raw traceback."""
+    account_id = _parse_requester_uuid(requested_by_account_id, option="--requested-by-account-id")
+    integration_id = _parse_requester_uuid(requested_by_integration_id, option="--requested-by-integration-id")
+
+    if job_type == BackgroundJobType.LIVE_RESEARCH_RUN_EXECUTION.value:
+        has_account = account_id is not None
+        has_integration = integration_id is not None
+        if has_account == has_integration:  # both set, or neither set
+            raise LiveResearchRequesterContextError(
+                "LIVE_RESEARCH_RUN_EXECUTION requires exactly one of --requested-by-account-id "
+                "or --requested-by-integration-id (got "
+                f"{'both' if has_account else 'neither'})."
+            )
+    return account_id, integration_id
+
+
 async def _create_job(
     service: BackgroundJobService, *, job_type: str, parameters_file: str | None, idempotency_key: str | None,
-    priority: str,
+    priority: str, requested_by_account_id: str | None = None, requested_by_integration_id: str | None = None,
 ) -> None:
     if not idempotency_key:
         raise StockResearchError("--create-job requires --idempotency-key")
+
+    resolved_account_id, resolved_integration_id = _resolve_requester_identity(
+        job_type=job_type, requested_by_account_id=requested_by_account_id,
+        requested_by_integration_id=requested_by_integration_id,
+    )
+
     raw_parameters: dict = {}
     if parameters_file:
         with open(parameters_file, "r", encoding="utf-8") as handle:
@@ -153,6 +223,7 @@ async def _create_job(
     result = await service.create_job(
         job_type=BackgroundJobType(job_type), raw_parameters=raw_parameters, idempotency_key=idempotency_key,
         trigger_source=JobTriggerSource.ADMIN_CLI, priority=BackgroundJobPriority(priority),
+        requested_by_account_id=resolved_account_id, requested_by_integration_id=resolved_integration_id,
         correlation_id="cli-create-job",
     )
     print(f"{'Created' if result.created else 'Existing (idempotent)'} job: {result.job.job_id} status={result.job.status.value}")
@@ -230,6 +301,8 @@ async def _run(args: argparse.Namespace) -> int:
             await _create_job(
                 service, job_type=args.create_job, parameters_file=args.parameters_file,
                 idempotency_key=args.idempotency_key, priority=args.priority,
+                requested_by_account_id=args.requested_by_account_id,
+                requested_by_integration_id=args.requested_by_integration_id,
             )
             return 0
 

@@ -11,16 +11,21 @@ jobs with different resource keys always can.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import TYPE_CHECKING, AsyncIterator
 from uuid import UUID
 
 from stock_research_core.application.exceptions import LockAcquisitionError
-from stock_research_core.application.operations.ports import DistributedLockPort
+from stock_research_core.application.operations.ports import DistributedLockPort, JobExecutionContext
 
 if TYPE_CHECKING:
     from stock_research_core.application.operations.ports import MetricsPort
+
+#: Matches `BackgroundJob.resource_key`'s persisted `max_length` - every
+#: resource key built here must fit, not just the Live Research one.
+_MAX_RESOURCE_KEY_LENGTH = 300
 
 #: Bounded, conservative defaults - never infinite. Individual job types
 #: may override via the registry entry if a longer-running handler needs it.
@@ -53,6 +58,7 @@ __all__ = [
     "knowledge_curriculum_refresh_resource_key",
     "knowledge_document_reembed_resource_key",
     "retrieval_evaluation_resource_key",
+    "live_research_job_resource_key",
 ]
 
 
@@ -74,6 +80,36 @@ def knowledge_document_reembed_resource_key(*, document_id: UUID) -> str:
 
 def retrieval_evaluation_resource_key(*, dataset: str, top_k: int) -> str:
     return f"retrieval-evaluation:{dataset}:{top_k}"
+
+
+def live_research_job_resource_key(context: JobExecutionContext) -> str:
+    """Phase G2B: locks `LIVE_RESEARCH_RUN_EXECUTION` per requester, so a
+    manual re-trigger cannot race a job-level retry for the same logical
+    request. Built entirely from `JobExecutionContext` - never a
+    `request_id` (the domain `ResearchRequest` does not exist yet when
+    this runs, at job-creation time), never the raw idempotency key
+    (only a bounded SHA-256 hash of it), never the research question,
+    and never a provider secret.
+
+    Uses the same `account:{id}` / `integration:{id}` requester-identity
+    convention as `BackgroundJobORM.requester_key` and
+    `domain.live_research.hashing.requester_key`; falls back to a
+    deterministic `source:{trigger_source}` key (rather than raising)
+    when neither identity field is set - e.g. an `ADMIN_CLI`/`SYSTEM`-
+    triggered job with no attached requester, a real, reachable state
+    during Stage 0/1 rollout.
+    """
+    if context.requested_by_account_id is not None:
+        requester = f"account:{context.requested_by_account_id}"
+    elif context.requested_by_integration_id is not None:
+        requester = f"integration:{context.requested_by_integration_id}"
+    else:
+        requester = f"source:{context.trigger_source.value}"
+
+    idempotency_hash = hashlib.sha256(context.idempotency_key.encode("utf-8")).hexdigest()[:32]
+    key = f"live-research-job:{requester}:{idempotency_hash}"
+    assert len(key) <= _MAX_RESOURCE_KEY_LENGTH, "live_research_job_resource_key exceeded the persisted bound"
+    return key
 
 
 @asynccontextmanager

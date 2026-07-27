@@ -21,13 +21,43 @@ from uuid import UUID, uuid4
 from stock_research_core.application.ai_tutor.knowledge_ingestion import KnowledgeIngestionService
 from stock_research_core.application.ai_tutor.models import TutorContext
 from stock_research_core.application.ai_tutor.ports import KnowledgeRetrieverPort, TutorGuardrailPort
-from stock_research_core.application.exceptions import SecurityNotFoundError, StockResearchError
+from stock_research_core.application.exceptions import (
+    DuplicateEvidenceError,
+    LiveResearchJobProviderNotConfiguredError,
+    LiveResearchProviderAccessError,
+    LiveResearchProviderConfigurationError,
+    LiveResearchProviderRateLimitError,
+    LiveResearchProviderResponseError,
+    LiveResearchProviderTimeoutError,
+    LiveResearchRequesterContextError,
+    SecurityNotFoundError,
+    StockResearchError,
+    TransientInfrastructureError,
+)
+from stock_research_core.application.live_research.provider_evidence_mapping import (
+    discovery_candidate_to_evidence_kwargs,
+    sec_company_facts_candidate_to_evidence_kwargs,
+    sec_submissions_candidate_to_evidence_kwargs,
+)
+from stock_research_core.application.live_research.provider_models import (
+    DiscoverySearchRequest,
+    ExternalEvidenceCandidate,
+    ProviderFetchResult,
+    SecCompanyFactsRequest,
+    SecSubmissionsRequest,
+)
+from stock_research_core.application.live_research.provider_ports import (
+    DiscoverySearchProviderPort,
+    OfficialCompanyDataProviderPort,
+)
+from stock_research_core.application.live_research.service import ResearchRequestService
 from stock_research_core.application.market_data.service import MarketDataIngestionService
 from stock_research_core.application.operations.models import (
     CurriculumKnowledgeRefreshParameters,
     KnowledgeGapSummaryParameters,
     KnowledgeReembedParameters,
     LearningQualityAggregationParameters,
+    LiveResearchRunExecutionParameters,
     LocalDocumentIngestionParameters,
     PortfolioBatchValuationParameters,
     PortfolioValuationParameters,
@@ -38,7 +68,11 @@ from stock_research_core.application.operations.models import (
     SystemMaintenanceParameters,
     TrackedMarketRefreshParameters,
 )
-from stock_research_core.application.operations.ports import HandlerOutcome, ProgressReporterPort
+from stock_research_core.application.operations.ports import (
+    HandlerOutcome,
+    JobExecutionContext,
+    ProgressReporterPort,
+)
 from stock_research_core.application.persistence.ports import UnitOfWorkPort
 from stock_research_core.application.quality_evaluation.models import EvaluationConfiguration
 from stock_research_core.application.quality_evaluation.ports import LearningQualityCalculatorPort
@@ -52,7 +86,9 @@ from stock_research_core.domain.ai_tutor.enums import (
     TutorMessageRole,
 )
 from stock_research_core.domain.ai_tutor.models import TutorMessage
+from stock_research_core.domain.live_research.enums import FailureCategory, ResearchRunStatus, ResearchScope
 from stock_research_core.domain.models import Security, utc_now
+from stock_research_core.domain.operations.sanitization import redact
 from stock_research_core.domain.virtual_portfolio.enums import PortfolioValuationRunStatus
 
 Clock = Callable[[], datetime]
@@ -156,7 +192,9 @@ class TrackedMarketRefreshJobHandler:
         self._market_data_service = market_data_service
         self._clock = clock
 
-    async def handle(self, *, parameters: TrackedMarketRefreshParameters, progress: ProgressReporterPort) -> HandlerOutcome:
+    async def handle(
+        self, *, context: JobExecutionContext, parameters: TrackedMarketRefreshParameters, progress: ProgressReporterPort
+    ) -> HandlerOutcome:
         async with self._unit_of_work_factory() as uow:
             tracked = await uow.tracked_securities.list_enabled()
 
@@ -241,7 +279,9 @@ class SecurityMarketRefreshJobHandler:
         self._market_data_service = market_data_service
         self._clock = clock
 
-    async def handle(self, *, parameters: SecurityMarketRefreshParameters, progress: ProgressReporterPort) -> HandlerOutcome:
+    async def handle(
+        self, *, context: JobExecutionContext, parameters: SecurityMarketRefreshParameters, progress: ProgressReporterPort
+    ) -> HandlerOutcome:
         await progress.report(current=0, total=1, message=f"Resolving {parameters.ticker}.")
         resolved = await self._security_resolver.resolve(parameters.ticker, None)
 
@@ -271,7 +311,9 @@ class PortfolioValuationJobHandler:
     def __init__(self, *, portfolio_valuation_service: PortfolioValuationService) -> None:
         self._service = portfolio_valuation_service
 
-    async def handle(self, *, parameters: PortfolioValuationParameters, progress: ProgressReporterPort) -> HandlerOutcome:
+    async def handle(
+        self, *, context: JobExecutionContext, parameters: PortfolioValuationParameters, progress: ProgressReporterPort
+    ) -> HandlerOutcome:
         await progress.report(current=0, total=1)
         result = await self._service.value_portfolio(portfolio_id=parameters.portfolio_id, as_of=parameters.as_of)
         await progress.report(current=1, total=1)
@@ -303,7 +345,9 @@ class PortfolioBatchValuationJobHandler:
         self._unit_of_work_factory = unit_of_work_factory
         self._service = portfolio_valuation_service
 
-    async def handle(self, *, parameters: PortfolioBatchValuationParameters, progress: ProgressReporterPort) -> HandlerOutcome:
+    async def handle(
+        self, *, context: JobExecutionContext, parameters: PortfolioBatchValuationParameters, progress: ProgressReporterPort
+    ) -> HandlerOutcome:
         if parameters.all_active_portfolios:
             async with self._unit_of_work_factory() as uow:
                 portfolio_ids = await uow.virtual_portfolios.list_all_active_ids()
@@ -355,7 +399,9 @@ class CurriculumKnowledgeRefreshJobHandler:
     def __init__(self, *, knowledge_ingestion_service: KnowledgeIngestionService) -> None:
         self._service = knowledge_ingestion_service
 
-    async def handle(self, *, parameters: CurriculumKnowledgeRefreshParameters, progress: ProgressReporterPort) -> HandlerOutcome:
+    async def handle(
+        self, *, context: JobExecutionContext, parameters: CurriculumKnowledgeRefreshParameters, progress: ProgressReporterPort
+    ) -> HandlerOutcome:
         await progress.report(current=0, total=1, message="Ingesting curriculum.")
         summary = await self._service.ingest_curriculum(
             include_lessons=parameters.include_lessons,
@@ -385,7 +431,9 @@ class LocalDocumentIngestionJobHandler:
         self._service = knowledge_ingestion_service
         self._clock = clock
 
-    async def handle(self, *, parameters: LocalDocumentIngestionParameters, progress: ProgressReporterPort) -> HandlerOutcome:
+    async def handle(
+        self, *, context: JobExecutionContext, parameters: LocalDocumentIngestionParameters, progress: ProgressReporterPort
+    ) -> HandlerOutcome:
         await progress.report(current=0, total=1)
         summary = await self._service.ingest_local_document(
             file_path=parameters.resolved_file_path(),
@@ -414,7 +462,9 @@ class KnowledgeReembedJobHandler:
         self._unit_of_work_factory = unit_of_work_factory
         self._service = knowledge_ingestion_service
 
-    async def handle(self, *, parameters: KnowledgeReembedParameters, progress: ProgressReporterPort) -> HandlerOutcome:
+    async def handle(
+        self, *, context: JobExecutionContext, parameters: KnowledgeReembedParameters, progress: ProgressReporterPort
+    ) -> HandlerOutcome:
         document_ids = parameters.document_ids
         if document_ids is None:
             async with self._unit_of_work_factory() as uow:
@@ -488,7 +538,9 @@ class RetrievalEvaluationJobHandler:
         self._retriever = retriever
         self._guardrail = guardrail
 
-    async def handle(self, *, parameters: RetrievalEvaluationParameters, progress: ProgressReporterPort) -> HandlerOutcome:
+    async def handle(
+        self, *, context: JobExecutionContext, parameters: RetrievalEvaluationParameters, progress: ProgressReporterPort
+    ) -> HandlerOutcome:
         cases = _EVALUATION_DATASETS.get(parameters.evaluation_dataset, ())
         warnings: list[str] = []
         if not cases:
@@ -596,7 +648,9 @@ class KnowledgeGapSummaryJobHandler:
     def __init__(self, *, unit_of_work_factory: Callable[[], UnitOfWorkPort]) -> None:
         self._unit_of_work_factory = unit_of_work_factory
 
-    async def handle(self, *, parameters: KnowledgeGapSummaryParameters, progress: ProgressReporterPort) -> HandlerOutcome:
+    async def handle(
+        self, *, context: JobExecutionContext, parameters: KnowledgeGapSummaryParameters, progress: ProgressReporterPort
+    ) -> HandlerOutcome:
         await progress.report(current=0, total=1)
         async with self._unit_of_work_factory() as uow:
             unresolved = await uow.tutor_knowledge_gaps.list_unresolved_gaps(limit=parameters.limit)
@@ -620,7 +674,9 @@ class SystemMaintenanceJobHandler:
         self._unit_of_work_factory = unit_of_work_factory
         self._clock = clock
 
-    async def handle(self, *, parameters: SystemMaintenanceParameters, progress: ProgressReporterPort) -> HandlerOutcome:
+    async def handle(
+        self, *, context: JobExecutionContext, parameters: SystemMaintenanceParameters, progress: ProgressReporterPort
+    ) -> HandlerOutcome:
         await progress.report(current=0, total=1)
         cutoff = self._clock() - timedelta(minutes=parameters.stale_after_minutes)
         async with self._unit_of_work_factory() as uow:
@@ -654,7 +710,9 @@ class RagasQualityEvaluationJobHandler:
         self._service = quality_evaluation_service
         self._default_configuration = default_configuration
 
-    async def handle(self, *, parameters: RagasQualityEvaluationParameters, progress: ProgressReporterPort) -> HandlerOutcome:
+    async def handle(
+        self, *, context: JobExecutionContext, parameters: RagasQualityEvaluationParameters, progress: ProgressReporterPort
+    ) -> HandlerOutcome:
         await progress.report(current=0, total=2, message="Creating evaluation run")
         configuration = self._default_configuration.model_copy(
             update={
@@ -692,7 +750,9 @@ class QualityBaselineComparisonJobHandler:
     def __init__(self, *, quality_evaluation_service: QualityEvaluationService) -> None:
         self._service = quality_evaluation_service
 
-    async def handle(self, *, parameters: QualityBaselineComparisonParameters, progress: ProgressReporterPort) -> HandlerOutcome:
+    async def handle(
+        self, *, context: JobExecutionContext, parameters: QualityBaselineComparisonParameters, progress: ProgressReporterPort
+    ) -> HandlerOutcome:
         await progress.report(current=0, total=1)
         report = await self._service.compare_with_baseline(run_id=parameters.run_id, baseline_id=parameters.baseline_id)
         await progress.report(current=1, total=1)
@@ -724,7 +784,9 @@ class LearningQualityAggregationJobHandler:
         self._unit_of_work_factory = unit_of_work_factory
         self._calculation_version = calculation_version
 
-    async def handle(self, *, parameters: LearningQualityAggregationParameters, progress: ProgressReporterPort) -> HandlerOutcome:
+    async def handle(
+        self, *, context: JobExecutionContext, parameters: LearningQualityAggregationParameters, progress: ProgressReporterPort
+    ) -> HandlerOutcome:
         metric_types = [LearningOutcomeMetricType(name) for name in parameters.metric_types]
         await progress.report(current=0, total=len(metric_types))
         persisted_count = 0
@@ -740,3 +802,309 @@ class LearningQualityAggregationJobHandler:
             persisted_count += len(aggregates)
             await progress.report(current=index, total=len(metric_types))
         return HandlerOutcome(result_summary={"aggregate_count": persisted_count, "metric_types": parameters.metric_types})
+
+
+# -- Phase G2B: Live Research background-job orchestration -----------------------------------------------
+
+#: The most provider calls any `ResearchScope` requires today
+#: (`COMPANY_OVERVIEW`: company facts + discovery search) - bounds how
+#: many entries `providers_called`/`provider_request_ids` can ever hold
+#: in a result summary.
+_LIVE_RESEARCH_MAX_PROVIDER_CALLS = 2
+
+
+def _map_live_research_failure(exc: Exception) -> tuple[FailureCategory, bool]:
+    """The Phase G2B failure-boundary mapping: which domain
+    `FailureCategory`/`retryable` a caught exception maps to. Order
+    matters only in that `TransientInfrastructureError` and the
+    catch-all are checked last - every `LiveResearchProviderError`
+    subclass and `LiveResearchJobProviderNotConfiguredError` are mutually
+    exclusive branches of the same hierarchy."""
+    if isinstance(exc, LiveResearchProviderTimeoutError):
+        return FailureCategory.TIMEOUT, True
+    if isinstance(exc, LiveResearchProviderRateLimitError):
+        return FailureCategory.RATE_LIMITED, True
+    if isinstance(exc, LiveResearchProviderAccessError):
+        return FailureCategory.PROVIDER_ERROR, False
+    if isinstance(exc, LiveResearchProviderResponseError):
+        return FailureCategory.PROVIDER_ERROR, False
+    if isinstance(exc, LiveResearchJobProviderNotConfiguredError):
+        return FailureCategory.PROVIDER_ERROR, False
+    if isinstance(exc, LiveResearchProviderConfigurationError):
+        return FailureCategory.PROVIDER_ERROR, False
+    if isinstance(exc, TransientInfrastructureError):
+        return FailureCategory.INTERNAL_ERROR, True
+    return FailureCategory.INTERNAL_ERROR, False
+
+
+#: Pairs one provider call's `ProviderFetchResult` with the *only*
+#: mapping function allowed to validate its candidates (G2B Correction
+#: V2, item 1) - binding provenance validation to the exact call that
+#: produced the result, never a shared global allowlist.
+_ProviderCall = tuple[ProviderFetchResult, "Callable[[ExternalEvidenceCandidate], dict[str, Any]]"]
+
+
+def _require_exactly_one_trusted_requester(context: JobExecutionContext) -> None:
+    """G2B Correction V3, item 1: a Live Research run is always attributed
+    to exactly one trusted requester - an account or an integration
+    client, never both, never neither.
+
+    Enforced here, inside the handler, and not only in
+    `cli/operations_admin._resolve_requester_identity`: that CLI check
+    guards CLI-created jobs only, whereas `LIVE_RESEARCH_RUN_EXECUTION`
+    is a registered job type that `SYSTEM`/`RETRY` triggers and any
+    programmatic `BackgroundJobService.create_job` caller can also reach.
+    Without this check such a caller would get as far as `submit_request`
+    and fail deep inside it on `domain.live_research.hashing.
+    requester_key`'s bare `ValueError` (not even a `StockResearchError`)
+    - an opaque infrastructure-shaped failure for what is really a
+    rejected request.
+
+    Raised before the first `progress.report`, before `submit_request`
+    and before any provider call, so neither a `ResearchRequest` nor a
+    `ResearchRun` is ever created for an un-attributable request.
+    `LiveResearchRequesterContextError` is deliberately absent from
+    `LIVE_RESEARCH_RUN_EXECUTION`'s retryable exception list, so the
+    job fails non-retryably - retrying cannot add an identity.
+    """
+    has_account = context.requested_by_account_id is not None
+    has_integration = context.requested_by_integration_id is not None
+    if has_account == has_integration:
+        raise LiveResearchRequesterContextError(
+            "LIVE_RESEARCH_RUN_EXECUTION requires exactly one trusted requester identity on its "
+            "JobExecutionContext (requested_by_account_id XOR requested_by_integration_id); got "
+            f"{'both' if has_account else 'neither'}."
+        )
+
+
+class LiveResearchRunExecutionJobHandler:
+    """Phase G2B: orchestrates one Live Research run end to end.
+
+    `BackgroundJob` -> this handler -> `ResearchRequestService.submit_request`
+    -> `create_next_run` -> `start_run` -> the scope's required G2A1
+    provider port(s) -> the call-bound evidence-mapping function
+    (provenance validation) -> `ResearchRequestService.record_evidence` ->
+    `complete_run`/`fail_run`. Never persists directly, never calls
+    OpenAI/LangGraph, never creates a `ResearchClaim` - only evidence.
+
+    Both provider dependencies may be `None` (feature-flag disabled or
+    the specific provider not enabled in its own G2A1 settings) - a scope
+    that needs a `None` provider fails with
+    `LiveResearchJobProviderNotConfiguredError` before any provider call.
+
+    Exactly one trusted requester identity is required on the
+    `JobExecutionContext`, and this handler enforces that itself rather
+    than trusting an upstream caller to have done so: the admin CLI's
+    own check (`cli/operations_admin._resolve_requester_identity`) only
+    covers CLI-created jobs, while `SYSTEM`- and `RETRY`-triggered and
+    programmatic callers can invoke this registered job type directly.
+    """
+
+    def __init__(
+        self,
+        *,
+        research_request_service: ResearchRequestService,
+        discovery_search_provider: DiscoverySearchProviderPort | None,
+        official_company_data_provider: OfficialCompanyDataProviderPort | None,
+        jobs_enabled: bool,
+        discovery_max_results: int = 10,
+        clock: Clock = utc_now,
+    ) -> None:
+        self._research_request_service = research_request_service
+        self._discovery_search_provider = discovery_search_provider
+        self._official_company_data_provider = official_company_data_provider
+        self._jobs_enabled = jobs_enabled
+        # Wired from `PerplexitySearchSettings.live_research_perplexity_max_results`
+        # by `registry_factory.py` - never the `DiscoverySearchRequest`
+        # model's own silent default (G2B Correction V2, item 5).
+        self._discovery_max_results = discovery_max_results
+        self._clock = clock
+
+    async def handle(
+        self, *, context: JobExecutionContext, parameters: LiveResearchRunExecutionParameters, progress: ProgressReporterPort
+    ) -> HandlerOutcome:
+        if not self._jobs_enabled:
+            # The top-level orchestration switch is off: no
+            # ResearchRequest, no ResearchRun, no provider call - exactly
+            # as disabled-by-default G2B rollout requires.
+            raise LiveResearchJobProviderNotConfiguredError(
+                "Live Research job orchestration is disabled (OperationsSettings.live_research_jobs_enabled=False)."
+            )
+
+        _require_exactly_one_trusted_requester(context)
+
+        await progress.report(current=0, total=1, message=f"Submitting research request ({parameters.scope.value}).")
+        submission = await self._research_request_service.submit_request(
+            account_id=context.requested_by_account_id,
+            integration_id=context.requested_by_integration_id,
+            idempotency_key=context.idempotency_key,
+            original_question=parameters.original_question,
+            scope=parameters.scope,
+            subject_security_id=parameters.subject_security_id,
+            subject_raw_text=parameters.subject_raw_text,
+        )
+        run = await self._research_request_service.create_next_run(submission.request.request_id)
+
+        # G2B Correction V2, item 2: every await from here on is covered -
+        # start_run, provider configuration checks, provider calls,
+        # candidate validation, record_evidence, the final progress
+        # report, and complete_run/fail_run(NO_EVIDENCE_FOUND) itself.
+        # Any failure at any of those steps must fail the run (per its
+        # own mapped FailureCategory) before re-raising, so the run never
+        # stays QUEUED/RUNNING past this point - and nothing failure-prone
+        # runs after the run has already been made terminal.
+        try:
+            run = await self._research_request_service.start_run(run.run_id)
+            self._ensure_required_providers_configured(parameters.scope)
+            fetch_results = await self._call_required_providers(parameters)
+            (
+                evidence_recorded,
+                duplicates_skipped,
+                providers_called,
+                provider_request_ids,
+                candidates_received,
+            ) = await self._validate_and_persist_candidates(run_id=run.run_id, fetch_results=fetch_results)
+
+            result_summary: dict[str, Any] = {
+                "scope": parameters.scope.value,
+                "providers_called": providers_called,
+                "provider_request_ids": provider_request_ids,
+                "candidates_received": candidates_received,
+                "evidence_recorded": evidence_recorded,
+                "duplicates_skipped": duplicates_skipped,
+                "research_request_id": str(submission.request.request_id),
+                "research_run_id": str(run.run_id),
+                "research_attempt_number": run.attempt_number,
+            }
+
+            # Moved before terminalization (was previously after
+            # complete_run/fail_run): a failure here must still fail the
+            # run via the except clause below, not propagate past an
+            # already-terminal run.
+            await progress.report(current=1, total=1)
+
+            if evidence_recorded == 0:
+                # All required provider calls succeeded, but nothing was
+                # recorded - a legitimate domain conclusion ("nothing
+                # found"), not an infrastructure/provider failure. The
+                # ResearchRun fails as NO_EVIDENCE_FOUND while the
+                # BackgroundJob itself still succeeds - no exception is
+                # raised here. This is the one case where a technically
+                # SUCCEEDED BackgroundJob must still unambiguously expose
+                # a FAILED ResearchRun in its own result_summary, since
+                # the job's own status alone cannot distinguish it from a
+                # completed run.
+                await self._research_request_service.fail_run(
+                    run.run_id, failure_category=FailureCategory.NO_EVIDENCE_FOUND,
+                    message="All required provider calls succeeded but no evidence was recorded.", retryable=False,
+                )
+                result_summary["research_run_status"] = ResearchRunStatus.FAILED.value
+                result_summary["failure_category"] = FailureCategory.NO_EVIDENCE_FOUND.value
+            else:
+                await self._research_request_service.complete_run(run.run_id)
+                result_summary["research_run_status"] = ResearchRunStatus.COMPLETED.value
+                result_summary["failure_category"] = None
+        except Exception as exc:  # noqa: BLE001 - classified below, then re-raised unchanged
+            failure_category, retryable = _map_live_research_failure(exc)
+            sanitized_message = str(redact(str(exc)))[:2000]
+            await self._research_request_service.fail_run(
+                run.run_id, failure_category=failure_category, message=sanitized_message, retryable=retryable,
+            )
+            raise
+
+        return HandlerOutcome(result_summary=result_summary)
+
+    def _required_provider_names(self, scope: ResearchScope) -> list[str]:
+        if scope == ResearchScope.FINANCIAL_FILING_REVIEW:
+            return ["official_company_data_provider"]
+        if scope == ResearchScope.COMPANY_OVERVIEW:
+            return ["official_company_data_provider", "discovery_search_provider"]
+        if scope in (ResearchScope.NEWS_SCAN, ResearchScope.ANALYST_SENTIMENT, ResearchScope.GENERAL_QUESTION):
+            return ["discovery_search_provider"]
+        # MARKET_DATA_SNAPSHOT - unreachable: LiveResearchRunExecutionParameters
+        # rejects this scope at parameter-validation time.
+        raise LiveResearchJobProviderNotConfiguredError(f"Unsupported research scope: {scope.value}")
+
+    def _ensure_required_providers_configured(self, scope: ResearchScope) -> None:
+        available = {
+            "official_company_data_provider": self._official_company_data_provider,
+            "discovery_search_provider": self._discovery_search_provider,
+        }
+        missing = [name for name in self._required_provider_names(scope) if available[name] is None]
+        if missing:
+            raise LiveResearchJobProviderNotConfiguredError(
+                f"Required provider(s) not configured for scope {scope.value}: {', '.join(missing)}."
+            )
+
+    def _build_discovery_request(self, parameters: LiveResearchRunExecutionParameters) -> DiscoverySearchRequest:
+        return DiscoverySearchRequest(
+            query=parameters.original_question, max_results=self._discovery_max_results,
+        )
+
+    async def _call_required_providers(
+        self, parameters: LiveResearchRunExecutionParameters
+    ) -> list[_ProviderCall]:
+        results: list[_ProviderCall] = []
+        if parameters.scope == ResearchScope.FINANCIAL_FILING_REVIEW:
+            assert self._official_company_data_provider is not None
+            submissions_result = await self._official_company_data_provider.fetch_submissions(
+                SecSubmissionsRequest(cik=parameters.sec_cik)
+            )
+            results.append((submissions_result, sec_submissions_candidate_to_evidence_kwargs))
+        elif parameters.scope == ResearchScope.COMPANY_OVERVIEW:
+            assert self._official_company_data_provider is not None
+            assert self._discovery_search_provider is not None
+            facts_result = await self._official_company_data_provider.fetch_company_facts(
+                SecCompanyFactsRequest(cik=parameters.sec_cik, concepts=parameters.sec_concepts)
+            )
+            results.append((facts_result, sec_company_facts_candidate_to_evidence_kwargs))
+            search_result = await self._discovery_search_provider.search(self._build_discovery_request(parameters))
+            results.append((search_result, discovery_candidate_to_evidence_kwargs))
+        else:
+            assert self._discovery_search_provider is not None
+            search_result = await self._discovery_search_provider.search(self._build_discovery_request(parameters))
+            results.append((search_result, discovery_candidate_to_evidence_kwargs))
+        assert len(results) <= _LIVE_RESEARCH_MAX_PROVIDER_CALLS
+        return results
+
+    async def _validate_and_persist_candidates(
+        self, *, run_id: UUID, fetch_results: list[_ProviderCall]
+    ) -> tuple[int, int, list[str], dict[str, str], int]:
+        """Two phases, per G2B Correction V2 item 1: first, validate
+        *every* candidate from *every* required provider result (using
+        the mapping function bound to that exact call) before persisting
+        anything at all; only once the whole batch has validated
+        cleanly does the second phase call `record_evidence`. A route/
+        pair mismatch anywhere in the batch raises
+        `LiveResearchProviderResponseError` during validation, before any
+        `record_evidence` call for this batch has happened - no partial
+        evidence is ever persisted from a batch that turns out to
+        contain a mismatch. Duplicate evidence remains a benign
+        per-candidate skip, only decided in the second (persistence)
+        phase."""
+        providers_called: list[str] = []
+        provider_request_ids: dict[str, str] = {}
+        candidates_received = 0
+        validated_evidence_kwargs: list[dict[str, Any]] = []
+
+        for result, mapping_fn in fetch_results[:_LIVE_RESEARCH_MAX_PROVIDER_CALLS]:
+            providers_called.append(result.provider_name)
+            if result.provider_request_id:
+                provider_request_ids[result.provider_name] = result.provider_request_id
+            for candidate in result.candidates:
+                candidates_received += 1
+                # Raises immediately on a route/pair mismatch - nothing
+                # has been persisted yet, for this or any prior candidate
+                # in this batch.
+                validated_evidence_kwargs.append(mapping_fn(candidate))
+
+        evidence_recorded = 0
+        duplicates_skipped = 0
+        for evidence_kwargs in validated_evidence_kwargs:
+            try:
+                await self._research_request_service.record_evidence(run_id, **evidence_kwargs)
+                evidence_recorded += 1
+            except DuplicateEvidenceError:
+                duplicates_skipped += 1
+
+        return evidence_recorded, duplicates_skipped, providers_called, provider_request_ids, candidates_received

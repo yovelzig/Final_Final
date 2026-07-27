@@ -71,6 +71,7 @@ _TIME_LIMITS: dict[BackgroundJobType, int] = {
     BackgroundJobType.RAGAS_QUALITY_EVALUATION: 1800,
     BackgroundJobType.LEARNING_QUALITY_AGGREGATION: 900,
     BackgroundJobType.QUALITY_BASELINE_COMPARISON: 300,
+    BackgroundJobType.LIVE_RESEARCH_RUN_EXECUTION: 180,
 }
 
 
@@ -195,3 +196,4 @@ system_maintenance_task = _make_task(BackgroundJobType.SYSTEM_MAINTENANCE)
 ragas_quality_evaluation_task = _make_task(BackgroundJobType.RAGAS_QUALITY_EVALUATION)
 learning_quality_aggregation_task = _make_task(BackgroundJobType.LEARNING_QUALITY_AGGREGATION)
 quality_baseline_comparison_task = _make_task(BackgroundJobType.QUALITY_BASELINE_COMPARISON)
+live_research_run_execution_task = _make_task(BackgroundJobType.LIVE_RESEARCH_RUN_EXECUTION)

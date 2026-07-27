@@ -18,6 +18,7 @@ from stock_research_core.application.operations.models import (
     KnowledgeGapSummaryParameters,
     KnowledgeReembedParameters,
     LearningQualityAggregationParameters,
+    LiveResearchRunExecutionParameters,
     LocalDocumentIngestionParameters,
     PortfolioBatchValuationParameters,
     PortfolioValuationParameters,
@@ -28,7 +29,7 @@ from stock_research_core.application.operations.models import (
     SystemMaintenanceParameters,
     TrackedMarketRefreshParameters,
 )
-from stock_research_core.application.operations.ports import JobHandlerPort
+from stock_research_core.application.operations.ports import JobExecutionContext, JobHandlerPort
 from stock_research_core.domain.operations.enums import BackgroundJobType, JobTriggerSource
 
 # -- retry policy -----------------------------------------------
@@ -129,7 +130,7 @@ class JobRegistryEntry:
     maximum_attempts: int
     retry_policy: object  # FixedScheduleRetryPolicy | ExponentialBackoffRetryPolicy | NeverRetryPolicy
     time_limit_seconds: int
-    resource_key_builder: Callable[[JobParameters], str | None]
+    resource_key_builder: Callable[[JobExecutionContext, JobParameters], str | None]
     allowed_trigger_sources: frozenset[JobTriggerSource]
 
     def parse_parameters(self, raw_parameters: dict) -> JobParameters:
@@ -192,6 +193,8 @@ _NO_N8N_OR_API = frozenset(
 def build_default_retry_policies() -> dict[BackgroundJobType, object]:
     from stock_research_core.application.exceptions import (
         EmbeddingProviderError,
+        LiveResearchProviderRateLimitError,
+        LiveResearchProviderTimeoutError,
         ProviderRequestError,
         TransientInfrastructureError,
     )
@@ -200,6 +203,19 @@ def build_default_retry_policies() -> dict[BackgroundJobType, object]:
         maximum_attempts=4,
         delays_seconds=(30, 120, 600),
         retryable_exceptions=(ProviderRequestError, TransientInfrastructureError),
+    )
+    # Phase G2B: retries only genuinely transient Live Research provider
+    # conditions (timeout, rate limit) or shared infrastructure failures -
+    # access/response/configuration errors and any unlisted exception are
+    # deliberately excluded, since retrying those cannot change the outcome.
+    live_research_transient = FixedScheduleRetryPolicy(
+        maximum_attempts=4,
+        delays_seconds=(30, 120, 600),
+        retryable_exceptions=(
+            LiveResearchProviderTimeoutError,
+            LiveResearchProviderRateLimitError,
+            TransientInfrastructureError,
+        ),
     )
     infra_transient = ExponentialBackoffRetryPolicy(
         maximum_attempts=5,
@@ -228,6 +244,7 @@ def build_default_retry_policies() -> dict[BackgroundJobType, object]:
         BackgroundJobType.RAGAS_QUALITY_EVALUATION: infra_transient,
         BackgroundJobType.LEARNING_QUALITY_AGGREGATION: infra_transient,
         BackgroundJobType.QUALITY_BASELINE_COMPARISON: infra_transient,
+        BackgroundJobType.LIVE_RESEARCH_RUN_EXECUTION: live_research_transient,
     }
 
 
@@ -246,6 +263,10 @@ _JOB_TYPE_CONFIG: dict[BackgroundJobType, tuple[str, int, int, frozenset[JobTrig
     BackgroundJobType.RAGAS_QUALITY_EVALUATION: ("finquest.evaluation", 1800, 3, _ALL_TRIGGER_SOURCES),
     BackgroundJobType.LEARNING_QUALITY_AGGREGATION: ("finquest.evaluation", 900, 3, _ALL_TRIGGER_SOURCES),
     BackgroundJobType.QUALITY_BASELINE_COMPARISON: ("finquest.evaluation", 300, 3, _ALL_TRIGGER_SOURCES),
+    # Phase G2B, Stage 0: ADMIN_CLI/SYSTEM/RETRY only - N8N and the admin
+    # API are deliberately excluded until a later stage promotes them
+    # (see the rollout plan in the final report).
+    BackgroundJobType.LIVE_RESEARCH_RUN_EXECUTION: ("finquest.research", 180, 4, _NO_N8N_OR_API),
 }
 
 _JOB_TYPE_PARAMETER_MODEL: dict[BackgroundJobType, type[JobParameters]] = {
@@ -262,23 +283,27 @@ _JOB_TYPE_PARAMETER_MODEL: dict[BackgroundJobType, type[JobParameters]] = {
     BackgroundJobType.RAGAS_QUALITY_EVALUATION: RagasQualityEvaluationParameters,
     BackgroundJobType.LEARNING_QUALITY_AGGREGATION: LearningQualityAggregationParameters,
     BackgroundJobType.QUALITY_BASELINE_COMPARISON: QualityBaselineComparisonParameters,
+    BackgroundJobType.LIVE_RESEARCH_RUN_EXECUTION: LiveResearchRunExecutionParameters,
 }
 
 
-def _default_resource_key_builder(job_type: BackgroundJobType) -> Callable[[JobParameters], str | None]:
+def _default_resource_key_builder(
+    job_type: BackgroundJobType,
+) -> Callable[[JobExecutionContext, JobParameters], str | None]:
     from stock_research_core.application.operations.locking import (
         knowledge_curriculum_refresh_resource_key,
         knowledge_document_reembed_resource_key,
+        live_research_job_resource_key,
         market_security_resource_key,
         portfolio_valuation_resource_key,
         retrieval_evaluation_resource_key,
     )
 
-    def _no_lock(_: JobParameters) -> str | None:
+    def _no_lock(_context: JobExecutionContext, _parameters: JobParameters) -> str | None:
         return None
 
     if job_type == BackgroundJobType.SECURITY_MARKET_REFRESH:
-        def _builder(parameters: JobParameters) -> str | None:
+        def _builder(_context: JobExecutionContext, parameters: JobParameters) -> str | None:
             assert isinstance(parameters, SecurityMarketRefreshParameters)
             # Locked per-ticker/source/interval; the security_id is not yet
             # known at parameter-validation time, so the ticker stands in
@@ -289,15 +314,15 @@ def _default_resource_key_builder(job_type: BackgroundJobType) -> Callable[[JobP
 
         return _builder
     if job_type == BackgroundJobType.PORTFOLIO_VALUATION:
-        def _builder(parameters: JobParameters) -> str | None:
+        def _builder(_context: JobExecutionContext, parameters: JobParameters) -> str | None:
             assert isinstance(parameters, PortfolioValuationParameters)
             return portfolio_valuation_resource_key(portfolio_id=parameters.portfolio_id, as_of=parameters.as_of)
 
         return _builder
     if job_type in (BackgroundJobType.CURRICULUM_KNOWLEDGE_REFRESH, BackgroundJobType.LOCAL_DOCUMENT_INGESTION):
-        return lambda _parameters: knowledge_curriculum_refresh_resource_key()
+        return lambda _context, _parameters: knowledge_curriculum_refresh_resource_key()
     if job_type == BackgroundJobType.KNOWLEDGE_REEMBED:
-        def _builder(parameters: JobParameters) -> str | None:
+        def _builder(_context: JobExecutionContext, parameters: JobParameters) -> str | None:
             assert isinstance(parameters, KnowledgeReembedParameters)
             if parameters.document_ids and len(parameters.document_ids) == 1:
                 return knowledge_document_reembed_resource_key(document_id=parameters.document_ids[0])
@@ -305,9 +330,14 @@ def _default_resource_key_builder(job_type: BackgroundJobType) -> Callable[[JobP
 
         return _builder
     if job_type == BackgroundJobType.RETRIEVAL_EVALUATION:
-        def _builder(parameters: JobParameters) -> str | None:
+        def _builder(_context: JobExecutionContext, parameters: JobParameters) -> str | None:
             assert isinstance(parameters, RetrievalEvaluationParameters)
             return retrieval_evaluation_resource_key(dataset=parameters.evaluation_dataset, top_k=parameters.top_k)
+
+        return _builder
+    if job_type == BackgroundJobType.LIVE_RESEARCH_RUN_EXECUTION:
+        def _builder(context: JobExecutionContext, _parameters: JobParameters) -> str | None:
+            return live_research_job_resource_key(context)
 
         return _builder
     return _no_lock
