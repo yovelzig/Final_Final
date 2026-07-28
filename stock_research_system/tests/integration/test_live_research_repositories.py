@@ -289,6 +289,136 @@ async def test_evidence_item_list_for_run(uow_factory) -> None:
 
 
 # ---------------------------------------------------------------------------
+# EvidenceItem.list_page_for_run - database-level pagination (Phase G2C)
+# ---------------------------------------------------------------------------
+
+
+async def _create_many_evidence(uow_factory, run_id, count: int) -> list[EvidenceItem]:
+    # Explicit, strictly increasing `retrieved_at` values (rather than the
+    # real-wall-clock default) so pagination-order assertions below are
+    # never flaky due to two items landing on the same timestamp - the
+    # dedicated tiebreak test further down covers same-timestamp ordering.
+    return [
+        await _create_evidence(
+            uow_factory, run_id, source_title=f"Form 10-K #{i}", official_identifier=f"0001234567-26-{i:06d}",
+            retrieved_at=NOW.replace(microsecond=i * 1000),
+        )
+        for i in range(count)
+    ]
+
+
+async def test_list_page_for_run_first_page(uow_factory) -> None:
+    request = await _create_request(uow_factory)
+    run = await _create_run(uow_factory, request.request_id)
+    created = await _create_many_evidence(uow_factory, run.run_id, 5)
+
+    async with uow_factory() as uow:
+        page = await uow.evidence_items.list_page_for_run(run.run_id, limit=3, offset=0)
+
+    assert len(page) == 3
+    assert [item.evidence_id for item in page] == [item.evidence_id for item in created[:3]]
+
+
+async def test_list_page_for_run_later_page(uow_factory) -> None:
+    request = await _create_request(uow_factory)
+    run = await _create_run(uow_factory, request.request_id)
+    created = await _create_many_evidence(uow_factory, run.run_id, 5)
+
+    async with uow_factory() as uow:
+        page = await uow.evidence_items.list_page_for_run(run.run_id, limit=3, offset=3)
+
+    assert len(page) == 2
+    assert [item.evidence_id for item in page] == [item.evidence_id for item in created[3:5]]
+
+
+async def test_list_page_for_run_empty_final_page(uow_factory) -> None:
+    request = await _create_request(uow_factory)
+    run = await _create_run(uow_factory, request.request_id)
+    await _create_many_evidence(uow_factory, run.run_id, 3)
+
+    async with uow_factory() as uow:
+        page = await uow.evidence_items.list_page_for_run(run.run_id, limit=10, offset=3)
+
+    assert page == []
+
+
+async def test_list_page_for_run_requesting_limit_plus_one_reveals_has_more(uow_factory) -> None:
+    """The router asks the repository for `limit + 1` rows to compute
+    `has_more` without a separate `COUNT(*)` - verify the repository
+    actually returns that extra row when it exists, and does not when it
+    does not, so the router's `has_more = len(rows) > limit` is accurate."""
+    request = await _create_request(uow_factory)
+    run = await _create_run(uow_factory, request.request_id)
+    await _create_many_evidence(uow_factory, run.run_id, 4)
+
+    async with uow_factory() as uow:
+        # Router page size 4, so it requests limit+1=5 rows - only 4 exist.
+        rows_for_page_size_4 = await uow.evidence_items.list_page_for_run(run.run_id, limit=5, offset=0)
+        # Router page size 3, so it requests limit+1=4 rows - exactly 4 exist (the 4th reveals has_more).
+        rows_for_page_size_3 = await uow.evidence_items.list_page_for_run(run.run_id, limit=4, offset=0)
+
+    assert len(rows_for_page_size_4) == 4  # has_more would be False: len(rows) (4) is not > page size (4)
+    assert len(rows_for_page_size_3) == 4  # has_more would be True: len(rows) (4) is > page size (3)
+
+
+async def test_list_page_for_run_ordering_is_deterministic_with_evidence_id_tiebreak(uow_factory) -> None:
+    """Two items sharing the same `retrieved_at` must still paginate
+    deterministically - `evidence_id` breaks the tie."""
+    request = await _create_request(uow_factory)
+    run = await _create_run(uow_factory, request.request_id)
+    shared_retrieved_at = NOW
+    items = []
+    for i in range(4):
+        kwargs = _evidence_kwargs(
+            source_title=f"Tied #{i}", official_identifier=f"0001234567-26-900{i:03d}", retrieved_at=shared_retrieved_at,
+        )
+        content_hash = compute_evidence_content_hash(
+            source_type=kwargs["source_type"].value, classification=kwargs["classification"].value,
+            source_url=kwargs["source_url"], official_identifier=kwargs["official_identifier"],
+            source_title=kwargs["source_title"], publisher=kwargs["publisher"], published_at=kwargs["published_at"],
+            raw_excerpt=kwargs["raw_excerpt"], normalized_text=kwargs["normalized_text"],
+            structured_facts=kwargs["structured_facts"],
+        )
+        item = EvidenceItem(run_id=run.run_id, content_hash=content_hash, **kwargs)
+        async with uow_factory() as uow:
+            created = await uow.evidence_items.create(item)
+            await uow.commit()
+        items.append(created)
+    expected_order = sorted(items, key=lambda item: item.evidence_id)
+
+    async with uow_factory() as uow:
+        page_one = await uow.evidence_items.list_page_for_run(run.run_id, limit=2, offset=0)
+        page_two = await uow.evidence_items.list_page_for_run(run.run_id, limit=2, offset=2)
+
+    assert [item.evidence_id for item in page_one + page_two] == [item.evidence_id for item in expected_order]
+    # Repeated reads return the identical order - no row is skipped or repeated.
+    async with uow_factory() as uow:
+        page_one_again = await uow.evidence_items.list_page_for_run(run.run_id, limit=2, offset=0)
+    assert [item.evidence_id for item in page_one] == [item.evidence_id for item in page_one_again]
+
+
+async def test_list_page_for_run_does_not_include_other_runs_evidence(uow_factory) -> None:
+    request = await _create_request(uow_factory)
+    run_one = await _create_run(uow_factory, request.request_id, attempt_number=1)
+    async with uow_factory() as uow:
+        await uow.research_runs.mark_failed(
+            run_one.run_id, completed_at=NOW, failure_category=FailureCategory.PROVIDER_ERROR,
+            failure_message="failed", retryable=True,
+        )
+        await uow.commit()
+    run_two = await _create_run(uow_factory, request.request_id, attempt_number=2)
+
+    await _create_evidence(uow_factory, run_one.run_id, source_title="Run one evidence")
+    await _create_evidence(uow_factory, run_two.run_id, source_title="Run two evidence", official_identifier="0001234567-26-777777")
+
+    async with uow_factory() as uow:
+        page = await uow.evidence_items.list_page_for_run(run_two.run_id, limit=10, offset=0)
+
+    assert len(page) == 1
+    assert page[0].source_title == "Run two evidence"
+
+
+# ---------------------------------------------------------------------------
 # ResearchClaim + ClaimEvidenceLink
 # ---------------------------------------------------------------------------
 

@@ -82,6 +82,15 @@ class EvidenceItemRepositoryPort(Protocol):
 
     async def list_for_run(self, run_id: UUID) -> list[EvidenceItem]: ...
 
+    async def list_page_for_run(self, run_id: UUID, *, limit: int, offset: int) -> list[EvidenceItem]:
+        """A single deterministically-ordered page (Phase G2C), applying
+        `LIMIT`/`OFFSET` in SQL rather than loading every row and
+        slicing in Python. Ordering matches `list_for_run`'s existing
+        `retrieved_at` ascending order, with `evidence_id` as a stable
+        tiebreaker so pagination never skips or repeats a row when two
+        items share the same `retrieved_at` timestamp."""
+        ...
+
 
 class ResearchClaimRepositoryPort(Protocol):
     """Persists and queries only `ResearchClaim`'s own scalar fields.

@@ -71,3 +71,18 @@ class SqlAlchemyEvidenceItemRepository:
         )
         result = await self._session.execute(statement)
         return [evidence_item_orm_to_domain(row) for row in result.scalars().all()]
+
+    async def list_page_for_run(self, run_id: UUID, *, limit: int, offset: int) -> list[EvidenceItem]:
+        """Applies `LIMIT`/`OFFSET` in SQL (Phase G2C) - never loads every
+        evidence row for a run and slices in Python. `evidence_id` is an
+        added, stable tiebreaker after `retrieved_at` so a page never
+        skips or repeats a row when two items share the same timestamp."""
+        statement = (
+            select(EvidenceItemORM)
+            .where(EvidenceItemORM.run_id == run_id)
+            .order_by(EvidenceItemORM.retrieved_at.asc(), EvidenceItemORM.evidence_id.asc())
+            .limit(limit)
+            .offset(offset)
+        )
+        result = await self._session.execute(statement)
+        return [evidence_item_orm_to_domain(row) for row in result.scalars().all()]

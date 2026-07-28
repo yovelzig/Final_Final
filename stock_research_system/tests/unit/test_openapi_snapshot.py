@@ -62,6 +62,7 @@ _EXPECTED_PATHS = {
     "/api/v1/operations/metrics-summary",
     "/api/v1/integrations/n8n/jobs", "/api/v1/integrations/n8n/jobs/{job_id}",
     "/api/v1/integrations/n8n/jobs/{job_id}/events", "/api/v1/integrations/n8n/ready",
+    "/api/v1/integrations/n8n/jobs/{job_id}/live-research/evidence",
     "/api/v1/admin/evaluations/suites", "/api/v1/admin/evaluations/suites/import",
     "/api/v1/admin/evaluations/suites/{suite_id}", "/api/v1/admin/evaluations/suites/{suite_id}/approve",
     "/api/v1/admin/evaluations/suites/{suite_id}/archive",

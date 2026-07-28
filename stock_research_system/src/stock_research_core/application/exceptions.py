@@ -520,6 +520,32 @@ class LiveResearchJobProviderNotConfiguredError(StockResearchError):
     attempted; never a provider *request* failure."""
 
 
+class IntegrationClientNotFoundError(StockResearchError):
+    """No matching integration client was found."""
+
+
+class InvalidIntegrationClientIdentifierError(StockResearchError):
+    """A CLI-supplied integration client id was not a valid UUID (Phase
+    G2C Correction V2). The message is always a bounded, generic string -
+    it never includes the rejected raw value, and the CLI never lets the
+    underlying `ValueError`'s traceback reach the terminal."""
+
+
+class IntegrationClientFinalJobTypeError(StockResearchError):
+    """A revoke was requested that would remove an ACTIVE integration
+    client's last remaining allowed job type. The client must either be
+    disabled first, or granted a replacement job type before this one
+    is revoked."""
+
+
+class LiveResearchEvidenceNotAvailableError(StockResearchError):
+    """The Live Research evidence endpoint was called for a job/run that
+    is not a successfully completed Live Research run with recorded
+    evidence. Always uses a bounded, generic message - never reveals
+    the specific internal reason (wrong job type, non-terminal status,
+    a malformed result_summary, or a ResearchRun that is not COMPLETED)."""
+
+
 class LiveResearchRequesterContextError(StockResearchError):
     """A `LIVE_RESEARCH_RUN_EXECUTION` job was requested or executed
     without exactly one trusted requester identity.

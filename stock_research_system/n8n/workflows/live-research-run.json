@@ -1,0 +1,1301 @@
+{
+  "name": "FinQuest - Live Research Run",
+  "nodes": [
+    {
+      "id": "a1b2c3d4-0001-4a11-8a11-000000000001",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        240,
+        280
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "finquest/live-research-run",
+        "responseMode": "responseNode",
+        "authentication": "headerAuth",
+        "options": {}
+      },
+      "webhookId": "a1b2c3d4-0001-4a11-8a11-000000000099",
+      "notes": "Production entry point. Requires Header Auth (authentication=headerAuth) via a dedicated INBOUND credential - distinct from the OUTBOUND 'FinQuest Integration Key' credential used by the HTTP Request nodes below. Only a caller presenting the correct header (configured in n8n Cloud's credential store, never in this JSON) reaches 'Validate / Build Request'. invocation_id is mandatory on this path - never generated here. responseMode=responseNode (Correction V3): this workflow can poll for approximately 40 minutes, so the webhook connection is never held open for the full research run - 'Respond 400 - Validation Error' or 'Respond 202 - Accepted' answers immediately, and polling continues afterward inside the n8n execution.",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "__REPLACE_WITH_YOUR_INBOUND_WEBHOOK_CREDENTIAL_ID__",
+          "name": "FinQuest Live Research Webhook Auth"
+        }
+      }
+    },
+    {
+      "id": "a1b2c3d4-0002-4a11-8a11-000000000002",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        240,
+        480
+      ],
+      "parameters": {},
+      "notes": "DEV/TESTING ONLY. When invocation_id is absent on this path, 'Validate / Build Request' generates a temporary UUID that is stable only within this one execution. This path must never be used in production and never weakens the Webhook Trigger's mandatory invocation_id validation or its Header Auth requirement. A Respond to Webhook node never executes on this path (Correction V3) - there is no webhook call to respond to. A valid Manual request goes directly to 'Init Polling State' after 'Trigger FinQuest Job'; an invalid one stops at 'Validation Error Output' and never calls FinQuest."
+    },
+    {
+      "id": "a1b2c3d4-0003-4a11-8a11-000000000003",
+      "name": "Validate / Build Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        460,
+        380
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const isManual = $execution.mode === 'manual';\n\n// Final correction - safe input envelope. $input.first().json is always\n// an object (n8n guarantees this for the trigger's own output), but the\n// webhook body it carries - or, on the Manual Trigger path, the raw item\n// itself when no 'body' wrapper is present - can be anything a caller\n// sends: null, an array, a string, a number, or a genuine object. None of\n// those ever throws here; a non-object is rejected with a bounded\n// validationError that never echoes the raw input.\nconst rawInput = $input.first().json;\nconst rawInputIsPlainObject = rawInput !== null && typeof rawInput === 'object' && !Array.isArray(rawInput);\nconst body = rawInputIsPlainObject && rawInput.body !== undefined ? rawInput.body : rawInput;\n\nif (body === null || typeof body !== 'object' || Array.isArray(body)) {\n  return [{ json: { isManual, validationError: 'Request body must be a JSON object.' } }];\n}\n\n// Pure-JavaScript UUID v4 generator (Correction V2: no Node built-in\n// module import here - n8n Cloud code nodes run in a restricted sandbox\n// and must not depend on one). DEV/TESTING ONLY - never invoked on the\n// production Webhook path, and never a cryptographically strong id; it\n// only needs to be unique within this one workflow execution.\nfunction generateTemporaryUuidV4() {\n  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {\n    const r = Math.floor(Math.random() * 16);\n    const v = c === 'x' ? r : (r & 0x3) | 0x8;\n    return v.toString(16);\n  });\n}\n\n// isManual is preserved on EVERY returned json (success or\n// validationError) so downstream IF nodes never need to re-derive\n// $execution.mode themselves - a single, explicit source of truth for\n// the manual-vs-production routing split.\n\nlet invocationId = body.invocation_id;\nif (!invocationId) {\n  if (!isManual) {\n    // Production Webhook path: invocation_id is mandatory. Never generated\n    // silently here - fail validation instead, before any POST /jobs call.\n    return [{ json: { isManual, validationError: 'invocation_id is required for a production request and was not provided.' } }];\n  }\n  // DEV/TESTING ONLY (Manual Trigger path): a temporary UUID, stable only\n  // within this one workflow execution. Never reachable from the\n  // production Webhook Trigger.\n  invocationId = generateTemporaryUuidV4();\n}\n\nif (typeof invocationId !== 'string') {\n  return [{ json: { isManual, validationError: 'invocation_id must be a string.' } }];\n}\ninvocationId = invocationId.trim();\nconst UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;\nif (!UUID_PATTERN.test(invocationId)) {\n  return [{ json: { isManual, validationError: 'invocation_id must be a canonical UUID.' } }];\n}\ninvocationId = invocationId.toLowerCase();\n\n// Final correction - FINQUEST_API_BASE_URL/FINQUEST_KEY_ID are parsed and\n// normalized exactly ONCE, here. This is the ONLY node in the workflow\n// allowed to read $vars.FINQUEST_API_BASE_URL / $vars.FINQUEST_KEY_ID -\n// every FinQuest HTTP Request node downstream uses the validated\n// $json.apiBaseUrl / $json.keyId carried in the workflow state instead.\nconst configBaseUrlRaw = $vars.FINQUEST_API_BASE_URL;\nif (typeof configBaseUrlRaw !== 'string' || configBaseUrlRaw.trim() === '') {\n  return [{ json: { isManual, validationError: 'FINQUEST_API_BASE_URL is required and must be configured - there is no Docker-network fallback.' } }];\n}\n\nlet parsedBaseUrl;\ntry {\n  parsedBaseUrl = new URL(configBaseUrlRaw.trim());\n} catch (err) {\n  return [{ json: { isManual, validationError: 'FINQUEST_API_BASE_URL must be a valid URL.' } }];\n}\nif (!parsedBaseUrl.hostname) {\n  return [{ json: { isManual, validationError: 'FINQUEST_API_BASE_URL must include a hostname.' } }];\n}\nif (parsedBaseUrl.username || parsedBaseUrl.password) {\n  return [{ json: { isManual, validationError: 'FINQUEST_API_BASE_URL must not contain embedded credentials.' } }];\n}\nif (!isManual && parsedBaseUrl.protocol !== 'https:') {\n  return [{ json: { isManual, validationError: 'FINQUEST_API_BASE_URL must be an HTTPS URL for a production request.' } }];\n}\n// Trailing slash(es) removed so every downstream HTTP node can safely\n// concatenate a leading-slash path without ever producing a double slash.\nconst apiBaseUrl = parsedBaseUrl.toString().replace(/\\/+$/, '');\n\nconst configKeyIdRaw = $vars.FINQUEST_KEY_ID;\nif (typeof configKeyIdRaw !== 'string' || configKeyIdRaw.trim() === '') {\n  return [{ json: { isManual, validationError: 'FINQUEST_KEY_ID is required and must be configured.' } }];\n}\nconst keyId = configKeyIdRaw.trim();\n\n// Final correction - minimal, safety/routing-critical request validation\n// only. The FinQuest backend's Pydantic model remains authoritative for\n// exact length limits, complete SEC CIK validation, concept\n// limits/deduplication, and every remaining parameter constraint - this\n// workflow deliberately does not duplicate it. A request that fails one\n// of these minimal checks never reaches Trigger FinQuest Job; a request\n// that passes them but is still rejected by the backend is now handled\n// gracefully post-POST without crashing this execution (see 'Classify\n// Trigger Response').\nconst scope = body.scope;\nlet originalQuestion = body.original_question;\nlet subjectSecurityId = body.subject_security_id;\nlet subjectRawText = body.subject_raw_text;\nconst secCik = body.sec_cik;\nconst secConcepts = body.sec_concepts;\n\nif (typeof originalQuestion !== 'string') {\n  return [{ json: { isManual, validationError: 'original_question must be a string.' } }];\n}\noriginalQuestion = originalQuestion.trim();\nif (originalQuestion === '') {\n  return [{ json: { isManual, validationError: 'original_question must not be blank.' } }];\n}\n\nif (typeof subjectRawText === 'string') {\n  subjectRawText = subjectRawText.trim();\n  if (subjectRawText === '') {\n    // Blank becomes absent - never treated as a provided subject; this is\n    // routing-critical for the exactly-one-subject checks below.\n    subjectRawText = undefined;\n  }\n} else if (subjectRawText !== undefined && subjectRawText !== null) {\n  return [{ json: { isManual, validationError: 'subject_raw_text must be a string.' } }];\n} else {\n  subjectRawText = undefined;\n}\n\nif (typeof subjectSecurityId === 'string') {\n  subjectSecurityId = subjectSecurityId.trim();\n  if (subjectSecurityId === '') {\n    subjectSecurityId = undefined;\n  }\n} else if (subjectSecurityId !== undefined && subjectSecurityId !== null) {\n  return [{ json: { isManual, validationError: 'subject_security_id must be a string.' } }];\n} else {\n  subjectSecurityId = undefined;\n}\n\nconst hasSecConcepts = Array.isArray(secConcepts) ? secConcepts.length > 0 : Boolean(secConcepts);\n\nconst SUPPORTED_SCOPES = ['GENERAL_QUESTION', 'NEWS_SCAN', 'ANALYST_SENTIMENT', 'FINANCIAL_FILING_REVIEW', 'COMPANY_OVERVIEW'];\nif (!SUPPORTED_SCOPES.includes(scope)) {\n  return [{ json: { isManual, validationError: `Unsupported or missing scope '${scope}'. LIVE_RESEARCH_RUN_EXECUTION does not support MARKET_DATA_SNAPSHOT.` } }];\n}\n\nconst subjectCount = [subjectSecurityId, subjectRawText].filter((v) => v !== undefined).length;\n\nif (scope === 'GENERAL_QUESTION') {\n  if (subjectCount !== 0) {\n    return [{ json: { isManual, validationError: 'GENERAL_QUESTION must not include a subject.' } }];\n  }\n} else if (scope === 'NEWS_SCAN' || scope === 'ANALYST_SENTIMENT') {\n  if (subjectCount !== 1) {\n    return [{ json: { isManual, validationError: `${scope} requires exactly one of subject_security_id or subject_raw_text.` } }];\n  }\n} else if (scope === 'FINANCIAL_FILING_REVIEW') {\n  if (subjectCount !== 1) {\n    return [{ json: { isManual, validationError: 'FINANCIAL_FILING_REVIEW requires exactly one of subject_security_id or subject_raw_text.' } }];\n  }\n  if (!secCik) {\n    return [{ json: { isManual, validationError: 'FINANCIAL_FILING_REVIEW requires sec_cik.' } }];\n  }\n} else if (scope === 'COMPANY_OVERVIEW') {\n  if (subjectCount !== 1) {\n    return [{ json: { isManual, validationError: 'COMPANY_OVERVIEW requires exactly one of subject_security_id or subject_raw_text.' } }];\n  }\n  if (!secCik) {\n    return [{ json: { isManual, validationError: 'COMPANY_OVERVIEW requires sec_cik.' } }];\n  }\n  if (!hasSecConcepts) {\n    return [{ json: { isManual, validationError: 'COMPANY_OVERVIEW requires a non-empty sec_concepts array.' } }];\n  }\n}\n\nconst parameters = { original_question: originalQuestion, scope };\nif (subjectSecurityId) parameters.subject_security_id = subjectSecurityId;\nif (subjectRawText) parameters.subject_raw_text = subjectRawText;\nif (secCik) parameters.sec_cik = secCik;\nif (secConcepts !== undefined && secConcepts !== null) parameters.sec_concepts = secConcepts;\n\n// Derived per-invocation identifiers (Phase G2C): never derived from\n// question content, never the n8n execution ID alone. The same\n// invocation_id (reused across retries of one logical request) always\n// produces the same X-FinQuest-Request-ID and Idempotency-Key; a new\n// invocation_id - even for byte-identical parameters - always produces\n// different values, so it creates a different durable job.\nreturn [{\n  json: {\n    isManual,\n    jobType: 'LIVE_RESEARCH_RUN_EXECUTION',\n    parameters,\n    invocationId,\n    externalRequestId: `livequery-req:${invocationId}`,\n    idempotencyKey: `livequery-idem:${invocationId}`,\n    apiBaseUrl,\n    keyId,\n  },\n}];"
+      },
+      "notes": "The ONLY node allowed to read $vars.FINQUEST_API_BASE_URL / $vars.FINQUEST_KEY_ID (final correction). Parses FINQUEST_API_BASE_URL with the native URL() constructor (requires a hostname, rejects embedded username/password, requires https: for a production request, strips trailing slashes) and validates FINQUEST_KEY_ID is a non-blank string - both are carried forward as $json.apiBaseUrl / $json.keyId for every downstream FinQuest HTTP node. Never throws on a null/array/string/number request body - a non-object envelope is rejected with a bounded validationError that never echoes the raw input. Validates only safety/routing-critical fields (invocation_id, scope, a non-blank original_question, the per-scope subject-count rule, and presence of the required SEC fields) - the FinQuest backend's Pydantic model remains authoritative for exact length limits, full SEC CIK validation, and concept limits/deduplication."
+    },
+    {
+      "id": "a1b2c3d4-0004-4a11-8a11-000000000004",
+      "name": "Validation Passed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        680,
+        380
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.validationError }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "empty"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "a1b2c3d4-0005-4a11-8a11-000000000005",
+      "name": "Validation Error Output",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        900,
+        560
+      ],
+      "parameters": {},
+      "notes": "Validation failed before any POST /jobs call was made. Connect a webhook-response / alerting node here in a future phase."
+    },
+    {
+      "id": "a1b2c3d4-0006-4a11-8a11-000000000006",
+      "name": "Trigger FinQuest Job",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        900,
+        280
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.apiBaseUrl }}/api/v1/integrations/n8n/jobs",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-FinQuest-Key-Id",
+              "value": "={{ $json.keyId }}"
+            },
+            {
+              "name": "X-FinQuest-Request-ID",
+              "value": "={{ $json.externalRequestId }}"
+            },
+            {
+              "name": "Idempotency-Key",
+              "value": "={{ $json.idempotencyKey }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ job_type: $json.jobType, parameters: $json.parameters }) }}",
+        "options": {
+          "timeout": 15000,
+          "response": {
+            "response": {
+              "neverError": true,
+              "fullResponse": true,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "__REPLACE_WITH_YOUR_CREDENTIAL_ID__",
+          "name": "FinQuest Integration Key"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "notes": "Final correction: 'Never Error' + 'Full Response' options mean a non-2xx HTTP response (e.g. a 422/500 from FinQuest) is returned as normal item data (statusCode/headers/body) instead of throwing. onError=continueRegularOutput means a genuine transport-level failure (DNS, connection refused, timeout - no HTTP response at all) is likewise converted into a normal item instead of crashing this execution. 'Classify Trigger Response' (immediately downstream) inspects the result and routes to ACCEPTED / REJECTED (4xx) / INFRA_FAILURE (5xx or transport failure) - polling only ever begins on ACCEPTED."
+    },
+    {
+      "id": "a1b2c3d4-0007-4a11-8a11-000000000007",
+      "name": "Init Polling State",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        280
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const input = $input.first().json;\nconst jobId = input.jobId;\nif (!jobId) { throw new Error('FinQuest did not return a job_id'); }\nconst request = $('Validate / Build Request').first().json;\nconst waitSeconds = 15;\n// Primary deadline: computed ONCE, here - never re-derived from an\n// attempt counter alone. maxAttempts is only a bounded secondary safety\n// guard (~40 minutes at a 15-second interval).\nconst deadlineAt = Date.now() + 40 * 60 * 1000;\nconst maxAttempts = 160;\nreturn [{ json: {\n  jobId,\n  invocationId: request.invocationId,\n  apiBaseUrl: request.apiBaseUrl,\n  keyId: request.keyId,\n  attempt: 0,\n  maxAttempts,\n  waitSeconds,\n  deadlineAt,\n} }];"
+      }
+    },
+    {
+      "id": "a1b2c3d4-0008-4a11-8a11-000000000008",
+      "name": "Wait Before Poll",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1340,
+        280
+      ],
+      "parameters": {
+        "amount": "={{ $json.waitSeconds }}",
+        "unit": "seconds"
+      },
+      "webhookId": "a1b2c3d4-0008-4a11-8a11-000000000098"
+    },
+    {
+      "id": "a1b2c3d4-0009-4a11-8a11-000000000009",
+      "name": "Poll Job Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1560,
+        280
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.apiBaseUrl }}/api/v1/integrations/n8n/jobs/{{ $json.jobId }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-FinQuest-Key-Id",
+              "value": "={{ $json.keyId }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "__REPLACE_WITH_YOUR_CREDENTIAL_ID__",
+          "name": "FinQuest Integration Key"
+        }
+      }
+    },
+    {
+      "id": "a1b2c3d4-0010-4a11-8a11-000000000010",
+      "name": "Merge Polling State",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1780,
+        280
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const polled = $input.first().json;\nconst state = $('Init Polling State').first().json;\n// Correction V2: 'Increment Poll Attempt' has not run yet on the first\n// poll iteration (it only executes after the loop's first pass through\n// 'Is Terminal Or Timed Out?'), so its output must never be dereferenced\n// before confirming it actually executed - doing so throws in n8n rather\n// than returning a safe sentinel. isExecuted is checked first; .first()\n// on that node reference is only ever called when it is true.\nconst incrementNode = $('Increment Poll Attempt');\nconst attempt = incrementNode.isExecuted ? incrementNode.first().json.attempt : state.attempt;\nconst timedOut = Date.now() > state.deadlineAt;\nreturn [{ json: {\n  jobId: state.jobId,\n  invocationId: state.invocationId,\n  apiBaseUrl: state.apiBaseUrl,\n  keyId: state.keyId,\n  waitSeconds: state.waitSeconds,\n  maxAttempts: state.maxAttempts,\n  deadlineAt: state.deadlineAt,\n  attempt,\n  status: polled.status,\n  resultSummary: polled.result_summary || {},\n  timedOut,\n} }];"
+      }
+    },
+    {
+      "id": "a1b2c3d4-0011-4a11-8a11-000000000011",
+      "name": "Is Terminal Or Timed Out?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2000,
+        280
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "combinator": "or",
+          "conditions": [
+            {
+              "leftValue": "={{ ['SUCCEEDED', 'FAILED', 'CANCELLED', 'SKIPPED'].includes($json.status) }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            },
+            {
+              "leftValue": "={{ $json.timedOut === true }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            },
+            {
+              "leftValue": "={{ $json.attempt >= $json.maxAttempts }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ]
+        }
+      },
+      "notes": "Continues polling only while status is PENDING, QUEUED, RUNNING, or RETRY_SCHEDULED and neither the computed deadline nor the bounded attempt counter has been reached."
+    },
+    {
+      "id": "a1b2c3d4-0012-4a11-8a11-000000000012",
+      "name": "Increment Poll Attempt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2000,
+        460
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const state = $input.first().json;\nreturn [{ json: { ...state, attempt: (state.attempt || 0) + 1 } }];"
+      }
+    },
+    {
+      "id": "a1b2c3d4-0013-4a11-8a11-000000000013",
+      "name": "Status Switch",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        2220,
+        280
+      ],
+      "parameters": {
+        "mode": "rules",
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.status === 'SUCCEEDED' && $json.resultSummary && $json.resultSummary.research_run_status === 'COMPLETED' && Number($json.resultSummary.evidence_recorded) > 0 }}",
+                    "rightValue": true,
+                    "operator": {
+                      "type": "boolean",
+                      "operation": "true"
+                    }
+                  }
+                ]
+              },
+              "outputKey": "CompletedWithEvidence"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.status === 'SUCCEEDED' && $json.resultSummary && $json.resultSummary.research_run_status === 'FAILED' && $json.resultSummary.failure_category === 'NO_EVIDENCE_FOUND' }}",
+                    "rightValue": true,
+                    "operator": {
+                      "type": "boolean",
+                      "operation": "true"
+                    }
+                  }
+                ]
+              },
+              "outputKey": "NoEvidenceFound"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "combinator": "or",
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.timedOut === true }}",
+                    "rightValue": true,
+                    "operator": {
+                      "type": "boolean",
+                      "operation": "true"
+                    }
+                  },
+                  {
+                    "leftValue": "={{ $json.attempt >= $json.maxAttempts }}",
+                    "rightValue": true,
+                    "operator": {
+                      "type": "boolean",
+                      "operation": "true"
+                    }
+                  }
+                ]
+              },
+              "outputKey": "Timeout"
+            }
+          ]
+        },
+        "fallbackOutput": "extra",
+        "options": {}
+      },
+      "notes": "Branch order matters: a run that both completed and hit the deadline/max-attempts on the same poll is still reported as a completed result (evidence or no-evidence), never as a spurious timeout. The Timeout branch fires on EITHER the wall-clock deadline OR the bounded attempt-counter guard (Correction V2: the secondary max-attempts guard must never be misclassified as OPERATIONAL_FAILURE). The fallback output (any FAILED/CANCELLED/SKIPPED status, or an unexpected/malformed SUCCEEDED shape, while still non-terminal-and-not-timed-out is impossible by construction) always routes to Build Failure Summary and never calls the evidence endpoint."
+    },
+    {
+      "id": "a1b2c3d4-0014-4a11-8a11-000000000014",
+      "name": "Get Evidence",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2440,
+        60
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.apiBaseUrl }}/api/v1/integrations/n8n/jobs/{{ $json.jobId }}/live-research/evidence",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-FinQuest-Key-Id",
+              "value": "={{ $json.keyId }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "__REPLACE_WITH_YOUR_CREDENTIAL_ID__",
+          "name": "FinQuest Integration Key"
+        }
+      },
+      "notes": "Only reached on the completed-with-evidence branch. Never called for NO_EVIDENCE_FOUND or an operational failure/cancellation/skip."
+    },
+    {
+      "id": "a1b2c3d4-0015-4a11-8a11-000000000015",
+      "name": "Build Success Summary With Evidence",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2660,
+        60
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const evidencePage = $input.first().json;\nconst state = $('Merge Polling State').first().json;\nreturn [{ json: {\n  workflowResult: 'SUCCESS_WITH_EVIDENCE',\n  jobId: state.jobId,\n  invocationId: state.invocationId,\n  researchRunStatus: state.resultSummary.research_run_status,\n  evidenceRecorded: state.resultSummary.evidence_recorded,\n  evidence: evidencePage.items,\n  hasMoreEvidence: evidencePage.has_more,\n} }];"
+      }
+    },
+    {
+      "id": "a1b2c3d4-0016-4a11-8a11-000000000016",
+      "name": "Build No-Evidence Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2440,
+        280
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const state = $input.first().json;\nreturn [{ json: {\n  workflowResult: 'SUCCESS_NO_EVIDENCE',\n  jobId: state.jobId,\n  invocationId: state.invocationId,\n  researchRunStatus: state.resultSummary.research_run_status,\n  failureCategory: state.resultSummary.failure_category,\n  evidenceRecorded: 0,\n} }];"
+      }
+    },
+    {
+      "id": "a1b2c3d4-0017-4a11-8a11-000000000017",
+      "name": "Build Failure Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2440,
+        460
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const state = $input.first().json;\nreturn [{ json: {\n  workflowResult: 'OPERATIONAL_FAILURE',\n  jobId: state.jobId,\n  invocationId: state.invocationId,\n  status: state.status,\n  resultSummary: state.resultSummary,\n} }];"
+      }
+    },
+    {
+      "id": "a1b2c3d4-0018-4a11-8a11-000000000018",
+      "name": "Build Timeout Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2440,
+        640
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const state = $input.first().json;\nreturn [{ json: {\n  workflowResult: 'POLLING_TIMEOUT',\n  jobId: state.jobId,\n  invocationId: state.invocationId,\n  lastKnownStatus: state.status,\n  attempts: state.attempt,\n} }];"
+      },
+      "notes": "Never creates a second job on timeout. jobId and invocationId are preserved so an operator can look up the same durable job later."
+    },
+    {
+      "id": "a1b2c3d4-0019-4a11-8a11-000000000019",
+      "name": "Success Output",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        2880,
+        170
+      ],
+      "parameters": {},
+      "notes": "Covers both a completed run with evidence and a valid NO_EVIDENCE_FOUND result - both are a successful workflow outcome. Connect a Slack/Email node here in a future phase."
+    },
+    {
+      "id": "a1b2c3d4-0020-4a11-8a11-000000000020",
+      "name": "Failure Output",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        2660,
+        460
+      ],
+      "parameters": {},
+      "notes": "Bounded status/error information only - never calls the evidence endpoint. Connect a Slack/Email node here in a future phase."
+    },
+    {
+      "id": "a1b2c3d4-0021-4a11-8a11-000000000021",
+      "name": "Timeout Output",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        2660,
+        640
+      ],
+      "parameters": {},
+      "notes": "Bounded timeout output preserving job_id/invocation_id for operator follow-up. Connect a Slack/Email node here in a future phase."
+    },
+    {
+      "id": "a1b2c3d4-0022-4a11-8a11-000000000022",
+      "name": "Is Manual (Invalid Request)?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        900,
+        620
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.isManual }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ]
+        }
+      },
+      "notes": "Correction V3: splits an invalid request by trigger type. Manual (dev/testing) goes to the bounded 'Validation Error Output' noOp - a Respond to Webhook node must never execute during a Manual Trigger run. Production goes to 'Build Validation Error Response' -> 'Respond 400 - Validation Error', which responds before any POST /jobs call - Trigger FinQuest Job never executes for an invalid production request."
+    },
+    {
+      "id": "a1b2c3d4-0023-4a11-8a11-000000000023",
+      "name": "Build Validation Error Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        700
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const state = $input.first().json;\nreturn [{ json: {\n  accepted: false,\n  validation_error: state.validationError,\n} }];"
+      },
+      "notes": "Production-only, bounded 400 response body - never a raw internal detail or a traceback."
+    },
+    {
+      "id": "a1b2c3d4-0024-4a11-8a11-000000000024",
+      "name": "Respond 400 - Validation Error",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1340,
+        700
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseCode": 400
+        }
+      },
+      "notes": "Production-only. Responds before any POST /jobs call - Trigger FinQuest Job never executes for an invalid production request. Never reachable from a Manual Trigger run."
+    },
+    {
+      "id": "a1b2c3d4-0025-4a11-8a11-000000000025",
+      "name": "Is Manual (Job Triggered)?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1000,
+        140
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.isManual }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ]
+        }
+      },
+      "notes": "Final correction: fed from 'Trigger Outcome Switch' (Accepted branch) via 'Classify Trigger Response', which already carries isManual - reads $json.isManual directly rather than a node-reference expression. Manual (dev/testing) bypasses the Respond to Webhook node entirely and continues directly to 'Init Polling State' - there is no webhook call to respond to. Production fans out to BOTH 'Build Job Accepted Response' (-> 'Respond 202 - Accepted', an acceptance acknowledgment, not the final research result) AND 'Init Polling State' - the workflow continues polling after the 202 response and retains its final bounded output only in the n8n execution history."
+    },
+    {
+      "id": "a1b2c3d4-0026-4a11-8a11-000000000026",
+      "name": "Build Job Accepted Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1220,
+        60
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const classified = $input.first().json;\nconst request = $('Validate / Build Request').first().json;\nreturn [{ json: {\n  accepted: true,\n  job_id: classified.jobId,\n  invocation_id: request.invocationId,\n  status: 'POLLING_STARTED',\n} }];"
+      },
+      "notes": "Bounded acceptance body only - job_id, invocation_id, and status. Never the final research result."
+    },
+    {
+      "id": "a1b2c3d4-0027-4a11-8a11-000000000027",
+      "name": "Respond 202 - Accepted",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1440,
+        60
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseCode": 202
+        }
+      },
+      "notes": "Acceptance acknowledgment only - not the final research result. The workflow continues polling after this responds; the final bounded output (with or without evidence, or a failure/timeout) is retained only in the n8n execution history, never sent as a second HTTP response. Never reachable from a Manual Trigger run."
+    },
+    {
+      "id": "a1b2c3d4-0028-4a11-8a11-000000000028",
+      "name": "Classify Trigger Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        380
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const item = $input.first().json;\nconst request = $('Validate / Build Request').first().json;\n\n// Trigger FinQuest Job uses 'Never Error' + 'Full Response' (final\n// correction): a non-2xx HTTP response is returned as normal item data\n// (statusCode/headers/body) instead of throwing. It also sets\n// onError=continueRegularOutput, so a genuine transport-level failure\n// (DNS, connection refused, timeout - no HTTP response at all) is\n// likewise converted into a normal item (carrying only an `error` field\n// and no statusCode) instead of crashing this execution.\nconst statusCode = typeof item.statusCode === 'number' ? item.statusCode : undefined;\nconst responseBody = item.body;\n\nlet outcome;\nlet jobId;\nif (statusCode === undefined) {\n  outcome = 'INFRA_FAILURE';\n} else if (statusCode >= 200 && statusCode < 300) {\n  jobId = (responseBody && responseBody.job && responseBody.job.job_id) || (responseBody && responseBody.job_id);\n  outcome = jobId ? 'ACCEPTED' : 'INFRA_FAILURE';\n} else if (statusCode >= 400 && statusCode < 500) {\n  outcome = 'REJECTED';\n} else {\n  // Any 5xx, or an unexpected 1xx/3xx - treated as an infrastructure/\n  // server failure. Never silently polled.\n  outcome = 'INFRA_FAILURE';\n}\n\nreturn [{ json: {\n  outcome,\n  statusCode: statusCode === undefined ? null : statusCode,\n  jobId,\n  isManual: request.isManual,\n} }];"
+      },
+      "notes": "Final correction: classifies Trigger FinQuest Job's full HTTP response into exactly one of ACCEPTED / REJECTED (4xx) / INFRA_FAILURE (5xx or a transport failure with no HTTP response at all). Never re-derives isManual itself - reads it from 'Validate / Build Request'."
+    },
+    {
+      "id": "a1b2c3d4-0029-4a11-8a11-000000000029",
+      "name": "Trigger Outcome Switch",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        1120,
+        380
+      ],
+      "parameters": {
+        "mode": "rules",
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.outcome === 'ACCEPTED' }}",
+                    "rightValue": true,
+                    "operator": {
+                      "type": "boolean",
+                      "operation": "true"
+                    }
+                  }
+                ]
+              },
+              "outputKey": "Accepted"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.outcome === 'REJECTED' }}",
+                    "rightValue": true,
+                    "operator": {
+                      "type": "boolean",
+                      "operation": "true"
+                    }
+                  }
+                ]
+              },
+              "outputKey": "Rejected"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.outcome === 'INFRA_FAILURE' }}",
+                    "rightValue": true,
+                    "operator": {
+                      "type": "boolean",
+                      "operation": "true"
+                    }
+                  }
+                ]
+              },
+              "outputKey": "InfraFailure"
+            }
+          ]
+        },
+        "fallbackOutput": "extra",
+        "options": {}
+      },
+      "notes": "Routes on 'Classify Trigger Response'.outcome. The 'extra' fallback (an outcome value other than the three defined here, which cannot occur by construction) is defensively wired to the same InfraFailure consumer - never silently dropped, never polled."
+    },
+    {
+      "id": "a1b2c3d4-0030-4a11-8a11-000000000030",
+      "name": "Is Manual (Rejected Request)?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1340,
+        480
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.isManual }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ]
+        }
+      },
+      "notes": "FinQuest rejected the request with a 4xx status (e.g. a 422 the workflow's own minimal pre-POST validation did not catch). Never polls. Production returns a bounded 400 via the same 'Respond 400 - Validation Error' node used for a pre-POST validation failure; the complete backend response is never exposed. Manual returns a bounded operational/validation output via the existing 'Validation Error Output' noOp."
+    },
+    {
+      "id": "a1b2c3d4-0031-4a11-8a11-000000000031",
+      "name": "Build Manual Rejected Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1560,
+        420
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const classified = $input.first().json;\nconst request = $('Validate / Build Request').first().json;\nreturn [{ json: {\n  isManual: true,\n  invocationId: request.invocationId,\n  validationError: `FinQuest rejected the request (HTTP ${classified.statusCode}).`,\n} }];"
+      }
+    },
+    {
+      "id": "a1b2c3d4-0032-4a11-8a11-000000000032",
+      "name": "Build Job Rejected Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1560,
+        540
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const classified = $input.first().json;\nreturn [{ json: {\n  accepted: false,\n  validation_error: `FinQuest rejected the request (HTTP ${classified.statusCode}).`,\n} }];"
+      },
+      "notes": "Bounded 400 body only - the complete backend response (which may include Pydantic validation details) is never exposed."
+    },
+    {
+      "id": "a1b2c3d4-0033-4a11-8a11-000000000033",
+      "name": "Is Manual (Infra Failure)?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1340,
+        780
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.isManual }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ]
+        }
+      },
+      "notes": "FinQuest returned a 5xx status, or the HTTP call itself failed at the transport level (DNS, connection refused, timeout). Never polls. Production returns a bounded 502 via 'Respond 502 - Infra Failure'; Manual returns a bounded OPERATIONAL_FAILURE output via the existing 'Failure Output' noOp."
+    },
+    {
+      "id": "a1b2c3d4-0034-4a11-8a11-000000000034",
+      "name": "Build Manual Infra Failure Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1560,
+        720
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const classified = $input.first().json;\nconst request = $('Validate / Build Request').first().json;\nreturn [{ json: {\n  workflowResult: 'OPERATIONAL_FAILURE',\n  invocationId: request.invocationId,\n  status: classified.statusCode === null ? 'TRANSPORT_ERROR' : `HTTP_${classified.statusCode}`,\n} }];"
+      }
+    },
+    {
+      "id": "a1b2c3d4-0035-4a11-8a11-000000000035",
+      "name": "Build Infra Failure Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1560,
+        860
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const classified = $input.first().json;\nreturn [{ json: {\n  accepted: false,\n  operational_error: 'FinQuest is currently unavailable. Please retry later.',\n} }];"
+      },
+      "notes": "Bounded 502 body only - never the raw transport error message or a traceback."
+    },
+    {
+      "id": "a1b2c3d4-0036-4a11-8a11-000000000036",
+      "name": "Respond 502 - Infra Failure",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1780,
+        860
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseCode": 502
+        }
+      },
+      "notes": "Production-only. Never reachable from a Manual Trigger run. Never polls."
+    }
+  ],
+  "connections": {
+    "Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Validate / Build Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Validate / Build Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate / Build Request": {
+      "main": [
+        [
+          {
+            "node": "Validation Passed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validation Passed?": {
+      "main": [
+        [
+          {
+            "node": "Trigger FinQuest Job",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Is Manual (Invalid Request)?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Trigger FinQuest Job": {
+      "main": [
+        [
+          {
+            "node": "Classify Trigger Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Init Polling State": {
+      "main": [
+        [
+          {
+            "node": "Wait Before Poll",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait Before Poll": {
+      "main": [
+        [
+          {
+            "node": "Poll Job Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Poll Job Status": {
+      "main": [
+        [
+          {
+            "node": "Merge Polling State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Polling State": {
+      "main": [
+        [
+          {
+            "node": "Is Terminal Or Timed Out?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Terminal Or Timed Out?": {
+      "main": [
+        [
+          {
+            "node": "Status Switch",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Increment Poll Attempt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Increment Poll Attempt": {
+      "main": [
+        [
+          {
+            "node": "Wait Before Poll",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Status Switch": {
+      "main": [
+        [
+          {
+            "node": "Get Evidence",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build No-Evidence Summary",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Timeout Summary",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Failure Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Evidence": {
+      "main": [
+        [
+          {
+            "node": "Build Success Summary With Evidence",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Success Summary With Evidence": {
+      "main": [
+        [
+          {
+            "node": "Success Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build No-Evidence Summary": {
+      "main": [
+        [
+          {
+            "node": "Success Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Failure Summary": {
+      "main": [
+        [
+          {
+            "node": "Failure Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Timeout Summary": {
+      "main": [
+        [
+          {
+            "node": "Timeout Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Manual (Invalid Request)?": {
+      "main": [
+        [
+          {
+            "node": "Validation Error Output",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Validation Error Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Validation Error Response": {
+      "main": [
+        [
+          {
+            "node": "Respond 400 - Validation Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Manual (Job Triggered)?": {
+      "main": [
+        [
+          {
+            "node": "Init Polling State",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Job Accepted Response",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Init Polling State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Job Accepted Response": {
+      "main": [
+        [
+          {
+            "node": "Respond 202 - Accepted",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify Trigger Response": {
+      "main": [
+        [
+          {
+            "node": "Trigger Outcome Switch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Trigger Outcome Switch": {
+      "main": [
+        [
+          {
+            "node": "Is Manual (Job Triggered)?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Is Manual (Rejected Request)?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Is Manual (Infra Failure)?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Is Manual (Infra Failure)?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Manual (Rejected Request)?": {
+      "main": [
+        [
+          {
+            "node": "Build Manual Rejected Output",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Job Rejected Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Manual Rejected Output": {
+      "main": [
+        [
+          {
+            "node": "Validation Error Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Job Rejected Response": {
+      "main": [
+        [
+          {
+            "node": "Respond 400 - Validation Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Manual (Infra Failure)?": {
+      "main": [
+        [
+          {
+            "node": "Build Manual Infra Failure Output",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Infra Failure Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Manual Infra Failure Output": {
+      "main": [
+        [
+          {
+            "node": "Failure Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Infra Failure Response": {
+      "main": [
+        [
+          {
+            "node": "Respond 502 - Infra Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "description": "FinQuest Phase G2C: triggers exactly one LIVE_RESEARCH_RUN_EXECUTION background job via the n8n integration API, polls PostgreSQL-backed job status through the API (15-second interval, ~40-minute deadline), and - only for a successfully completed run with recorded evidence - retrieves a bounded, provenance-safe evidence page. Never calls Perplexity or SEC directly. Never exposes provider credentials. The production Webhook requires Header Auth and responds immediately (202/400/502, responseMode=responseNode) rather than holding the connection open for the full ~40-minute poll; the Manual Trigger (dev/testing only) never executes a Respond to Webhook node. FINQUEST_API_BASE_URL (parsed and normalized once - HTTPS required for production, no Docker-network fallback) and FINQUEST_KEY_ID are read only in 'Validate / Build Request' and carried forward as $json.apiBaseUrl/$json.keyId; no other node reads $vars directly. Trigger FinQuest Job never crashes this execution on a non-2xx response or a transport failure - a rejected (4xx) or infrastructure-failed (5xx/transport) job-creation attempt is classified explicitly and never polled."
+  },
+  "id": "b7e2a6b1-2f0a-4a8a-9f1a-6b6e9a8c1d2e",
+  "tags": [
+    "finquest",
+    "phase-g2c",
+    "live-research"
+  ]
+}

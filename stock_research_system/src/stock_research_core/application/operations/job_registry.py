@@ -188,6 +188,13 @@ _ALL_TRIGGER_SOURCES = frozenset(JobTriggerSource)
 _NO_N8N_OR_API = frozenset(
     {JobTriggerSource.ADMIN_CLI, JobTriggerSource.SYSTEM, JobTriggerSource.RETRY}
 )
+# Phase G2C: an authorized n8n Cloud workflow may now trigger this job
+# type (via the existing POST /api/v1/integrations/n8n/jobs endpoint,
+# subject to the calling IntegrationClient's own allowed_job_types) -
+# the admin-facing API trigger source remains deliberately excluded.
+_ADMIN_SYSTEM_RETRY_N8N = frozenset(
+    {JobTriggerSource.ADMIN_CLI, JobTriggerSource.SYSTEM, JobTriggerSource.RETRY, JobTriggerSource.N8N}
+)
 
 
 def build_default_retry_policies() -> dict[BackgroundJobType, object]:
@@ -263,10 +270,11 @@ _JOB_TYPE_CONFIG: dict[BackgroundJobType, tuple[str, int, int, frozenset[JobTrig
     BackgroundJobType.RAGAS_QUALITY_EVALUATION: ("finquest.evaluation", 1800, 3, _ALL_TRIGGER_SOURCES),
     BackgroundJobType.LEARNING_QUALITY_AGGREGATION: ("finquest.evaluation", 900, 3, _ALL_TRIGGER_SOURCES),
     BackgroundJobType.QUALITY_BASELINE_COMPARISON: ("finquest.evaluation", 300, 3, _ALL_TRIGGER_SOURCES),
-    # Phase G2B, Stage 0: ADMIN_CLI/SYSTEM/RETRY only - N8N and the admin
-    # API are deliberately excluded until a later stage promotes them
-    # (see the rollout plan in the final report).
-    BackgroundJobType.LIVE_RESEARCH_RUN_EXECUTION: ("finquest.research", 180, 4, _NO_N8N_OR_API),
+    # Phase G2C: N8N is now an allowed trigger source (an authorized n8n
+    # Cloud workflow may trigger this job through the existing n8n
+    # integration endpoint) - the admin-facing API trigger source
+    # remains deliberately excluded; see docs/migration-status.md.
+    BackgroundJobType.LIVE_RESEARCH_RUN_EXECUTION: ("finquest.research", 180, 4, _ADMIN_SYSTEM_RETRY_N8N),
 }
 
 _JOB_TYPE_PARAMETER_MODEL: dict[BackgroundJobType, type[JobParameters]] = {

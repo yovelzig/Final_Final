@@ -214,11 +214,14 @@ class TestLiveResearchRunExecutionRegistration:
         assert entry.time_limit_seconds == 180
         assert entry.maximum_attempts == 4
 
-    def test_stage_zero_excludes_n8n_and_api(self) -> None:
+    def test_g2c_allows_n8n_but_still_excludes_api(self) -> None:
+        """Phase G2C: N8N becomes an allowed trigger source for
+        LIVE_RESEARCH_RUN_EXECUTION; the admin-facing API trigger source
+        remains deliberately excluded (see docs/migration-status.md)."""
         handlers = {job_type: object() for job_type in BackgroundJobType}
         registry = build_default_registry(handlers)
         entry = registry.get(BackgroundJobType.LIVE_RESEARCH_RUN_EXECUTION)
-        assert JobTriggerSource.N8N not in entry.allowed_trigger_sources
+        assert JobTriggerSource.N8N in entry.allowed_trigger_sources
         assert JobTriggerSource.API not in entry.allowed_trigger_sources
         assert JobTriggerSource.ADMIN_CLI in entry.allowed_trigger_sources
         assert JobTriggerSource.SYSTEM in entry.allowed_trigger_sources

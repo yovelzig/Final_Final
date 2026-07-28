@@ -10,7 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stock_research_core.application.exceptions import PersistenceError
-from stock_research_core.domain.operations.enums import IntegrationClientStatus
+from stock_research_core.domain.operations.enums import BackgroundJobType, IntegrationClientStatus
 from stock_research_core.domain.operations.models import IntegrationClient
 from stock_research_core.infrastructure.database.mappers.operations_mappers import integration_client_orm_to_domain
 from stock_research_core.infrastructure.database.orm.integration_client import (
@@ -61,6 +61,16 @@ class SqlAlchemyIntegrationClientRepository:
         row = await self._session.get(IntegrationClientORM, integration_id)
         return await self._load(row) if row is not None else None
 
+    async def get_for_update(self, integration_id: UUID) -> IntegrationClient | None:
+        statement = (
+            select(IntegrationClientORM)
+            .where(IntegrationClientORM.integration_id == integration_id)
+            .with_for_update()
+        )
+        result = await self._session.execute(statement)
+        row = result.scalars().first()
+        return await self._load(row) if row is not None else None
+
     async def update_last_used(self, integration_id: UUID, *, last_used_at: datetime) -> IntegrationClient:
         row = await self._get_or_raise(integration_id)
         row.last_used_at = last_used_at
@@ -79,6 +89,31 @@ class SqlAlchemyIntegrationClientRepository:
         statement = select(IntegrationClientORM).order_by(IntegrationClientORM.created_at.asc())
         result = await self._session.execute(statement)
         return [await self._load(row) for row in result.scalars().all()]
+
+    async def add_allowed_job_type(self, integration_id: UUID, job_type: BackgroundJobType) -> None:
+        statement = select(IntegrationClientAllowedJobTypeORM).where(
+            IntegrationClientAllowedJobTypeORM.integration_id == integration_id,
+            IntegrationClientAllowedJobTypeORM.job_type == job_type.value,
+        )
+        result = await self._session.execute(statement)
+        if result.scalars().first() is not None:
+            return  # already granted - idempotent
+        self._session.add(
+            IntegrationClientAllowedJobTypeORM(integration_id=integration_id, job_type=job_type.value)
+        )
+        await self._session.flush()
+
+    async def remove_allowed_job_type(self, integration_id: UUID, job_type: BackgroundJobType) -> None:
+        statement = select(IntegrationClientAllowedJobTypeORM).where(
+            IntegrationClientAllowedJobTypeORM.integration_id == integration_id,
+            IntegrationClientAllowedJobTypeORM.job_type == job_type.value,
+        )
+        result = await self._session.execute(statement)
+        row = result.scalars().first()
+        if row is None:
+            return  # already absent - idempotent
+        await self._session.delete(row)
+        await self._session.flush()
 
     async def _load(self, row: IntegrationClientORM) -> IntegrationClient:
         statement = select(IntegrationClientAllowedJobTypeORM.job_type).where(
