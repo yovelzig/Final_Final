@@ -9,12 +9,15 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { ErrorState } from "@/components/ui/ErrorState";
 import { PageHeading } from "@/components/ui/PageHeading";
 import { LoadingSkeletonCard } from "@/components/ui/Skeleton";
-import { TUTOR_CONTEXT_LABELS } from "@/components/tutor/labels";
+import { getTutorContextLabel } from "@/components/tutor/labels";
 import { formatRelativeTime } from "@/lib/formatting";
 import { useConversations, useCreateConversation } from "@/hooks/useTutor";
+import { useDictionary, useLocale } from "@/providers/LocaleProvider";
 
 export default function TutorPage() {
   const router = useRouter();
+  const t = useDictionary();
+  const { locale } = useLocale();
   const conversationsQuery = useConversations();
   const createConversation = useCreateConversation();
 
@@ -28,11 +31,11 @@ export default function TutorPage() {
   return (
     <div>
       <PageHeading
-        title="AI tutor"
-        description="Ask questions grounded in FinQuest's curriculum. The tutor never gives personalized investment advice."
+        title={t.tutor.pageTitle}
+        description={t.tutor.pageDescription}
         action={
           <Button onClick={handleStartGeneral} isLoading={createConversation.isPending}>
-            Ask a question
+            {t.tutor.askQuestionCta}
           </Button>
         }
       />
@@ -44,7 +47,7 @@ export default function TutorPage() {
       ) : conversationsQuery.isError ? (
         <ErrorState error={conversationsQuery.error} onRetry={() => void conversationsQuery.refetch()} />
       ) : conversationsQuery.data.length === 0 ? (
-        <EmptyState title="No conversations yet" description="Ask the tutor a question to get started." />
+        <EmptyState title={t.tutor.empty.title} description={t.tutor.empty.description} />
       ) : (
         <ul className="flex flex-col divide-y divide-border rounded-card border border-border bg-surface px-6">
           {conversationsQuery.data.map((conversation) => (
@@ -54,10 +57,14 @@ export default function TutorPage() {
                 className="flex items-center justify-between gap-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-focus-ring"
               >
                 <div>
-                  <p className="text-sm font-medium text-slate-900">{TUTOR_CONTEXT_LABELS[conversation.context_type]}</p>
-                  <p className="text-xs text-muted">{formatRelativeTime(conversation.created_at)}</p>
+                  <p className="text-sm font-medium text-slate-900">
+                    {getTutorContextLabel(t, conversation.context_type)}
+                  </p>
+                  <p className="text-xs text-muted">{formatRelativeTime(conversation.created_at, new Date(), locale)}</p>
                 </div>
-                <Badge tone={conversation.status === "ACTIVE" ? "success" : "neutral"}>{conversation.status}</Badge>
+                <Badge tone={conversation.status === "ACTIVE" ? "success" : "neutral"}>
+                  {t.common.status[conversation.status]}
+                </Badge>
               </Link>
             </li>
           ))}

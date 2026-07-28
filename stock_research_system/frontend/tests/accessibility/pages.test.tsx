@@ -2,6 +2,7 @@ import { axe } from "jest-axe";
 import { http, HttpResponse } from "msw";
 import { describe, expect, it, vi } from "vitest";
 
+import HomePage from "@/app/page";
 import LoginPage from "@/app/(auth)/login/page";
 import RegisterPage from "@/app/(auth)/register/page";
 import DashboardPage from "@/app/(protected)/dashboard/page";
@@ -61,7 +62,8 @@ describe("accessibility: static routes", () => {
       ),
       http.get("*/api/v1/learners/me/mastery", () =>
         HttpResponse.json({ items: [], pagination: { limit: 50, offset: 0, returned: 0, total: 0 } })
-      )
+      ),
+      http.get("*/api/v1/portfolios", () => HttpResponse.json([]))
     );
     const { container, findByText } = renderWithProviders(<DashboardPage />);
     await findByText(/haven't started/i);
@@ -104,6 +106,43 @@ describe("accessibility: static routes", () => {
   it("/settings has no serious or critical violations", async () => {
     const { container } = renderWithProviders(<SettingsPage />);
     await waitFor(() => expect(document.querySelector("form")).toBeInTheDocument());
+    await expectNoViolations(container);
+  });
+});
+
+describe("accessibility: Hebrew (RTL) locale", () => {
+  it("/ (landing) in Hebrew has no serious or critical violations", async () => {
+    const { container } = renderWithProviders(<HomePage />, { locale: "he" });
+    await expectNoViolations(container);
+  });
+
+  it("/login in Hebrew has no serious or critical violations", async () => {
+    const { container } = renderWithProviders(<LoginPage />, { locale: "he" });
+    await expectNoViolations(container);
+  });
+
+  it("/register in Hebrew has no serious or critical violations", async () => {
+    const { container } = renderWithProviders(<RegisterPage />, { locale: "he" });
+    await expectNoViolations(container);
+  });
+
+  it("/dashboard in Hebrew has no serious or critical violations", async () => {
+    server.use(
+      http.get("*/api/v1/learners/me/dashboard", () =>
+        HttpResponse.json({
+          active_path_id: null, active_misconceptions: [], completed_lessons: 0, current_lesson_id: null,
+          current_streak_days: 0,
+          learner: { learner_id: "l1", display_name: "עדה", daily_goal_minutes: 10, preferred_language: "he", financial_experience_level: "BEGINNER" },
+          skill_mastery: [], total_lessons: 0, total_xp: 0,
+        })
+      ),
+      http.get("*/api/v1/learners/me/mastery", () =>
+        HttpResponse.json({ items: [], pagination: { limit: 50, offset: 0, returned: 0, total: 0 } })
+      ),
+      http.get("*/api/v1/portfolios", () => HttpResponse.json([]))
+    );
+    const { container, findByText } = renderWithProviders(<DashboardPage />, { locale: "he" });
+    await findByText("עדיין לא התחלתם מסלול למידה");
     await expectNoViolations(container);
   });
 });

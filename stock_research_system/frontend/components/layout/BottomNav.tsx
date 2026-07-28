@@ -5,13 +5,15 @@ import { usePathname } from "next/navigation";
 
 import { NavIcon } from "@/components/layout/NavIcon";
 import { PRIMARY_NAV_ITEMS } from "@/components/layout/nav-items";
+import { useDictionary } from "@/providers/LocaleProvider";
 
 export function BottomNav() {
   const pathname = usePathname();
+  const t = useDictionary();
 
   return (
     <nav
-      aria-label="Primary"
+      aria-label={t.nav.mobileNavLabel}
       className="fixed inset-x-0 bottom-0 z-10 flex border-t border-border bg-surface px-1 py-1 lg:hidden"
       style={{ paddingBottom: "max(0.25rem, env(safe-area-inset-bottom))" }}
     >
@@ -27,7 +29,7 @@ export function BottomNav() {
             }`}
           >
             <NavIcon icon={item.icon} className="h-5 w-5" />
-            {item.label}
+            {t.nav[item.labelKey]}
           </Link>
         );
       })}

@@ -2,7 +2,9 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, renderHook, type RenderHookOptions, type RenderOptions } from "@testing-library/react";
 import type { ReactNode, ReactElement } from "react";
 
+import type { Locale } from "@/lib/i18n/config";
 import { AuthProvider } from "@/providers/AuthProvider";
+import { LocaleProvider } from "@/providers/LocaleProvider";
 
 function buildTestQueryClient(): QueryClient {
   return new QueryClient({
@@ -28,24 +30,40 @@ export function renderHookWithQuery<TResult, TProps>(
   return { queryClient, ...renderHook(hook, { wrapper: Wrapper, ...options }) };
 }
 
-/** Query-only wrapper - for components that don't touch auth state. */
-export function renderWithQuery(ui: ReactElement, options?: Omit<RenderOptions, "wrapper">) {
+/** Query-only wrapper - for components that don't touch auth state.
+ * Still wrapped in `LocaleProvider` since shared primitives
+ * (`ErrorState`, `LoadingSkeletonCard`, ...) read `useDictionary()`
+ * unconditionally, matching the real `AppProviders` composition. */
+export function renderWithQuery(
+  ui: ReactElement,
+  options?: Omit<RenderOptions, "wrapper"> & { locale?: Locale }
+) {
   const queryClient = buildTestQueryClient();
   function Wrapper({ children }: { children: ReactNode }) {
-    return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
+    return (
+      <LocaleProvider initialLocale={options?.locale ?? "en"}>
+        <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+      </LocaleProvider>
+    );
   }
   return { queryClient, ...render(ui, { wrapper: Wrapper, ...options }) };
 }
 
 /** Full provider stack, including `AuthProvider` - use for components
- * that read `useAuth()` or otherwise depend on session bootstrap. */
-export function renderWithProviders(ui: ReactElement, options?: Omit<RenderOptions, "wrapper">) {
+ * that read `useAuth()` or otherwise depend on session bootstrap.
+ * Pass `{ locale: "he" }` to exercise Hebrew/RTL rendering. */
+export function renderWithProviders(
+  ui: ReactElement,
+  options?: Omit<RenderOptions, "wrapper"> & { locale?: Locale }
+) {
   const queryClient = buildTestQueryClient();
   function Wrapper({ children }: { children: ReactNode }) {
     return (
-      <QueryClientProvider client={queryClient}>
-        <AuthProvider>{children}</AuthProvider>
-      </QueryClientProvider>
+      <LocaleProvider initialLocale={options?.locale ?? "en"}>
+        <QueryClientProvider client={queryClient}>
+          <AuthProvider>{children}</AuthProvider>
+        </QueryClientProvider>
+      </LocaleProvider>
     );
   }
   return { queryClient, ...render(ui, { wrapper: Wrapper, ...options }) };

@@ -11,10 +11,12 @@ import { FormField } from "@/components/ui/FormField";
 import { PasswordField } from "@/components/auth/PasswordField";
 import { FinQuestApiError } from "@/lib/api/client";
 import { useAuth } from "@/hooks/useAuth";
+import { useDictionary } from "@/providers/LocaleProvider";
 import { registerFormSchema, type RegisterFormValues } from "@/lib/validation/auth";
 
 export function RegisterForm() {
   const { register: registerAccount } = useAuth();
+  const t = useDictionary();
   const [submitError, setSubmitError] = useState<string | null>(null);
   const {
     register,
@@ -44,14 +46,14 @@ export function RegisterForm() {
         // or a specific password-policy violation) - never invented here.
         setSubmitError(error.message);
       } else {
-        setSubmitError("Something went wrong. Please try again.");
+        setSubmitError(t.auth.register.genericError);
       }
     }
   };
 
   return (
     <form onSubmit={handleSubmit(onSubmit)} noValidate className="flex flex-col gap-4 rounded-card border border-border bg-surface p-6 shadow-sm">
-      <h1 className="text-xl font-bold text-slate-900">Create your account</h1>
+      <h1 className="text-xl font-bold text-slate-900">{t.auth.register.title}</h1>
 
       {submitError ? (
         <Alert tone="danger" role="alert">
@@ -59,23 +61,38 @@ export function RegisterForm() {
         </Alert>
       ) : null}
 
-      <FormField label="Display name" autoComplete="name" error={errors.displayName?.message} {...register("displayName")} />
-      <FormField label="Email" type="email" autoComplete="email" error={errors.email?.message} {...register("email")} />
+      <FormField
+        label={t.auth.register.displayName}
+        autoComplete="name"
+        error={errors.displayName?.message}
+        {...register("displayName")}
+      />
+      <FormField
+        label={t.auth.register.email}
+        type="email"
+        autoComplete="email"
+        error={errors.email?.message}
+        {...register("email")}
+      />
       <PasswordField
-        label="Password"
+        label={t.auth.register.password}
         autoComplete="new-password"
-        hint="At least 10 characters, with at least 3 of: lowercase, uppercase, number, symbol."
+        hint={t.auth.register.passwordHint}
+        showLabel={t.auth.passwordShow}
+        hideLabel={t.auth.passwordHide}
         error={errors.password?.message}
         {...register("password")}
       />
       <PasswordField
-        label="Confirm password"
+        label={t.auth.register.confirmPassword}
         autoComplete="new-password"
+        showLabel={t.auth.passwordShow}
+        hideLabel={t.auth.passwordHide}
         error={errors.confirmPassword?.message}
         {...register("confirmPassword")}
       />
       <FormField
-        label="Daily goal (minutes)"
+        label={t.auth.register.dailyGoal}
         type="number"
         min={5}
         max={240}
@@ -84,13 +101,13 @@ export function RegisterForm() {
       />
 
       <Button type="submit" isLoading={isSubmitting} className="mt-2 w-full">
-        Create account
+        {t.auth.register.submit}
       </Button>
 
       <p className="text-center text-sm text-muted">
-        Already have an account?{" "}
+        {t.auth.register.haveAccount}{" "}
         <Link href="/login" className="font-medium text-primary hover:underline">
-          Log in
+          {t.auth.register.logIn}
         </Link>
       </p>
     </form>

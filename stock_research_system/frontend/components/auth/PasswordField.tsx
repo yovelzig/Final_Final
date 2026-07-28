@@ -6,9 +6,20 @@ export interface PasswordFieldProps extends Omit<InputHTMLAttributes<HTMLInputEl
   label: string;
   error?: string;
   hint?: string;
+  showLabel?: string;
+  hideLabel?: string;
 }
 
-export function PasswordField({ label, error, hint, id, className = "", ...props }: PasswordFieldProps) {
+export function PasswordField({
+  label,
+  error,
+  hint,
+  id,
+  className = "",
+  showLabel = "Show",
+  hideLabel = "Hide",
+  ...props
+}: PasswordFieldProps) {
   const [visible, setVisible] = useState(false);
   const generatedId = useId();
   const fieldId = id ?? generatedId;
@@ -28,7 +39,7 @@ export function PasswordField({ label, error, hint, id, className = "", ...props
           aria-invalid={error ? true : undefined}
           aria-describedby={describedBy}
           autoComplete={props.autoComplete}
-          className={`w-full rounded-lg border border-border bg-white px-3 py-2.5 pr-16 text-sm text-slate-900 placeholder:text-slate-400 focus:border-primary ${
+          className={`w-full rounded-lg border border-border bg-white px-3 py-2.5 pe-16 text-sm text-slate-900 placeholder:text-slate-400 focus:border-primary ${
             error ? "border-danger" : ""
           } ${className}`}
           {...props}
@@ -37,10 +48,10 @@ export function PasswordField({ label, error, hint, id, className = "", ...props
           type="button"
           onClick={() => setVisible((current) => !current)}
           aria-pressed={visible}
-          className="absolute right-2 rounded px-2 py-1 text-xs font-medium text-slate-500 hover:text-primary"
+          className="absolute end-2 rounded px-2 py-1 text-xs font-medium text-slate-500 hover:text-primary"
         >
-          {visible ? "Hide" : "Show"}
-          <span className="sr-only"> password</span>
+          {visible ? hideLabel : showLabel}
+          <span className="sr-only"> {label}</span>
         </button>
       </div>
       {hint && !error ? (

@@ -1,4 +1,7 @@
+"use client";
+
 import { Alert } from "@/components/ui/Alert";
+import { useDictionary } from "@/providers/LocaleProvider";
 import type { components } from "@/types/generated-api";
 
 type TutorContextType = components["schemas"]["TutorContextType"];
@@ -7,19 +10,19 @@ type TutorContextType = components["schemas"]["TutorContextType"];
  * the backend's guardrails are the actual enforcement; this only sets
  * the learner's expectations up front. */
 export function ContextSafetyBanner({ contextType }: { contextType: TutorContextType }) {
+  const t = useDictionary();
+
   if (contextType === "SCENARIO_BEFORE_DECISION") {
     return (
-      <Alert tone="warning" title="Before you decide">
-        The tutor will help you think through this scenario, but it will never tell you what actually
-        happened or which option is &ldquo;correct&rdquo; - that stays hidden until you reveal the outcome.
+      <Alert tone="warning" title={t.tutor.contextSafety.beforeDecisionTitle}>
+        {t.tutor.contextSafety.beforeDecisionBody}
       </Alert>
     );
   }
   if (contextType === "PORTFOLIO_EXPLANATION") {
     return (
-      <Alert tone="info" title="Educational only">
-        The tutor can explain what&apos;s in your virtual portfolio and general investing concepts. It
-        won&apos;t tell you what to buy or sell, or give personalized investment advice.
+      <Alert tone="info" title={t.tutor.contextSafety.portfolioTitle}>
+        {t.tutor.contextSafety.portfolioBody}
       </Alert>
     );
   }
