@@ -2,12 +2,14 @@
 
 import { useState } from "react";
 
+import { useDictionary } from "@/providers/LocaleProvider";
 import type { CitationResponse } from "@/types/api-schemas";
 
 /** Renders only the learner-safe citation fields the backend provides
  * - never a chunk id, embedding vector, or raw prompt text (those
  * never appear in `CitationResponse` to begin with). */
 export function CitationList({ citations }: { citations: CitationResponse[] }) {
+  const t = useDictionary();
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
 
   if (citations.length === 0) return null;
@@ -26,7 +28,7 @@ export function CitationList({ citations }: { citations: CitationResponse[] }) {
 
   return (
     <div className="mt-3 flex flex-col gap-2">
-      <p className="text-xs font-medium text-muted">Sources</p>
+      <p className="text-xs font-medium text-muted">{t.tutor.sourcesLabel}</p>
       <ul className="flex flex-col gap-1.5">
         {citations.map((citation) => {
           const isExpanded = expanded.has(citation.citation_number);
@@ -47,7 +49,9 @@ export function CitationList({ citations }: { citations: CitationResponse[] }) {
               {isExpanded ? (
                 <div className="border-t border-border px-3 py-2 text-slate-600">
                   <p className="italic">&ldquo;{citation.excerpt}&rdquo;</p>
-                  <p className="mt-1 text-slate-500">Source: {citation.source_title}</p>
+                  <p className="mt-1 text-slate-500">
+                    {t.tutor.sourceLabel}: {citation.source_title}
+                  </p>
                 </div>
               ) : null}
             </li>

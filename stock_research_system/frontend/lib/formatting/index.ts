@@ -1,12 +1,23 @@
-/** Locale-aware, pure formatting helpers - never do currency/percentage
- * math here, only presentation of already-computed backend values. */
+import { toIntlLocale, type Locale } from "@/lib/i18n/config";
 
-export function formatCurrency(value: number, currency = "USD"): string {
-  return new Intl.NumberFormat("en-US", { style: "currency", currency, maximumFractionDigits: 2 }).format(value);
+/** Locale-aware, pure formatting helpers - never do currency/percentage
+ * math here, only presentation of already-computed backend values.
+ * Every function's `locale` parameter defaults to `"en"` so existing
+ * callers outside the bilingual MVP surfaces are unaffected; screens
+ * that read `useLocale()` should pass it through explicitly. */
+
+export function formatCurrency(value: number, currency = "USD", locale: Locale = "en"): string {
+  return new Intl.NumberFormat(toIntlLocale(locale), { style: "currency", currency, maximumFractionDigits: 2 }).format(
+    value
+  );
 }
 
-export function formatPercentage(value: number, options?: { signDisplay?: "always" | "auto" }): string {
-  return new Intl.NumberFormat("en-US", {
+export function formatPercentage(
+  value: number,
+  options?: { signDisplay?: "always" | "auto" },
+  locale: Locale = "en"
+): string {
+  return new Intl.NumberFormat(toIntlLocale(locale), {
     style: "percent",
     minimumFractionDigits: 1,
     maximumFractionDigits: 2,
@@ -14,23 +25,25 @@ export function formatPercentage(value: number, options?: { signDisplay?: "alway
   }).format(value);
 }
 
-export function formatNumber(value: number): string {
-  return new Intl.NumberFormat("en-US", { maximumFractionDigits: 4 }).format(value);
+export function formatNumber(value: number, locale: Locale = "en"): string {
+  return new Intl.NumberFormat(toIntlLocale(locale), { maximumFractionDigits: 4 }).format(value);
 }
 
-export function formatDate(isoString: string): string {
-  return new Intl.DateTimeFormat("en-US", { dateStyle: "medium" }).format(new Date(isoString));
+export function formatDate(isoString: string, locale: Locale = "en"): string {
+  return new Intl.DateTimeFormat(toIntlLocale(locale), { dateStyle: "medium" }).format(new Date(isoString));
 }
 
-export function formatDateTime(isoString: string): string {
-  return new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeStyle: "short" }).format(new Date(isoString));
+export function formatDateTime(isoString: string, locale: Locale = "en"): string {
+  return new Intl.DateTimeFormat(toIntlLocale(locale), { dateStyle: "medium", timeStyle: "short" }).format(
+    new Date(isoString)
+  );
 }
 
-export function formatRelativeTime(isoString: string, now: Date = new Date()): string {
+export function formatRelativeTime(isoString: string, now: Date = new Date(), locale: Locale = "en"): string {
   const target = new Date(isoString);
   const diffMs = target.getTime() - now.getTime();
   const diffMinutes = Math.round(diffMs / 60_000);
-  const formatter = new Intl.RelativeTimeFormat("en-US", { numeric: "auto" });
+  const formatter = new Intl.RelativeTimeFormat(toIntlLocale(locale), { numeric: "auto" });
 
   const absMinutes = Math.abs(diffMinutes);
   if (absMinutes < 60) return formatter.format(diffMinutes, "minute");

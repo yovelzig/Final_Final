@@ -11,11 +11,14 @@ import { PageHeading } from "@/components/ui/PageHeading";
 import { LoadingSkeletonCard } from "@/components/ui/Skeleton";
 import { TextareaField } from "@/components/ui/Textarea";
 import { LessonMarkdown } from "@/components/learning/LessonMarkdown";
+import { detectTextDirection } from "@/lib/i18n/config";
 import { useCloseCoachThread, useCoachThread } from "@/hooks/useLearningCoach";
 import { useCoachStream } from "@/hooks/useCoachStream";
+import { useDictionary } from "@/providers/LocaleProvider";
 
 export default function CoachThreadPage({ params }: { params: Promise<{ threadId: string }> }) {
   const { threadId } = use(params);
+  const t = useDictionary();
   const threadQuery = useCoachThread(threadId);
   const closeThread = useCloseCoachThread();
   const { turns, isStreaming, startTurn, resumeTurn } = useCoachStream(threadId);
@@ -34,6 +37,8 @@ export default function CoachThreadPage({ params }: { params: Promise<{ threadId
 
   const handleSend = (event: React.FormEvent) => {
     event.preventDefault();
+    // Unicode question text (Hebrew, English, or mixed) is trimmed of
+    // surrounding whitespace only, then sent to the run stream as-is.
     const trimmed = userInput.trim();
     if (!trimmed || isStreaming || isClosed) return;
     setUserInput("");
@@ -47,22 +52,23 @@ export default function CoachThreadPage({ params }: { params: Promise<{ threadId
         action={
           !isClosed ? (
             <Button variant="ghost" onClick={() => closeThread.mutate(threadId)} isLoading={closeThread.isPending}>
-              Close conversation
+              {t.coach.closeConversation}
             </Button>
           ) : (
-            <Badge tone="neutral">Closed</Badge>
+            <Badge tone="neutral">{t.coach.closed}</Badge>
           )
         }
       />
 
       <div className="flex flex-col gap-4" aria-live="polite">
-        {turns.length === 0 ? (
-          <p className="text-sm text-muted">Ask a question below to get started.</p>
-        ) : null}
+        {turns.length === 0 ? <p className="text-sm text-muted">{t.coach.startPrompt}</p> : null}
 
         {turns.map((turn) => (
           <div key={turn.id} className="flex flex-col gap-2">
-            <div className="ml-auto max-w-2xl rounded-card border border-primary/20 bg-primary-light p-4 text-sm text-slate-800">
+            <div
+              dir={detectTextDirection(turn.userInput)}
+              className="ms-auto max-w-2xl rounded-card border border-primary/20 bg-primary-light p-4 text-sm text-slate-800"
+            >
               {turn.userInput}
             </div>
 
@@ -82,13 +88,16 @@ export default function CoachThreadPage({ params }: { params: Promise<{ threadId
               <div className="max-w-2xl rounded-card border border-border bg-surface p-4 text-sm">
                 <LessonMarkdown content={turn.answerMarkdown} />
                 {turn.citations.length > 0 ? (
-                  <ul className="mt-3 flex flex-col gap-1 border-t border-border pt-2 text-xs text-muted">
-                    {turn.citations.map((citation) => (
-                      <li key={citation.citation_number}>
-                        [{citation.citation_number}] {citation.document_title} &mdash; {citation.source_title}
-                      </li>
-                    ))}
-                  </ul>
+                  <div className="mt-3 border-t border-border pt-2">
+                    <p className="text-xs font-medium text-muted">{t.tutor.sourcesLabel}</p>
+                    <ul className="mt-1 flex flex-col gap-1 text-xs text-muted">
+                      {turn.citations.map((citation) => (
+                        <li key={citation.citation_number}>
+                          [{citation.citation_number}] {citation.document_title} &mdash; {citation.source_title}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
                 ) : null}
               </div>
             ) : null}
@@ -108,7 +117,7 @@ export default function CoachThreadPage({ params }: { params: Promise<{ threadId
             {turn.navigationTarget ? (
               <Link href={turn.navigationTarget} className="self-start">
                 <Button size="sm" variant="secondary">
-                  Continue
+                  {t.coach.continueLabel}
                 </Button>
               </Link>
             ) : null}
@@ -118,18 +127,19 @@ export default function CoachThreadPage({ params }: { params: Promise<{ threadId
         {!isClosed ? (
           <form onSubmit={handleSend} className="flex flex-col gap-3 rounded-card border border-border bg-surface p-4">
             <TextareaField
-              label="Ask your coach"
+              label={t.coach.askLabel}
               value={userInput}
               onChange={(event) => setUserInput(event.target.value)}
+              dir={detectTextDirection(userInput)}
               rows={3}
               disabled={isStreaming}
             />
             <Button type="submit" isLoading={isStreaming} disabled={!userInput.trim()} className="self-start">
-              Send
+              {t.coach.send}
             </Button>
           </form>
         ) : (
-          <p className="text-sm text-muted">This conversation is closed.</p>
+          <p className="text-sm text-muted">{t.coach.conversationClosedNotice}</p>
         )}
       </div>
     </div>

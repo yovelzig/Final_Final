@@ -30,6 +30,10 @@ body {
   border: 0;
 }
 
+.bidi-isolate {
+  unicode-bidi: isolate;
+}
+
 .sr-only-focusable:focus {
   position: static;
   width: auto;

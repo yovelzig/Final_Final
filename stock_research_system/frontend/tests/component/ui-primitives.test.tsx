@@ -6,7 +6,7 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { ErrorState } from "@/components/ui/ErrorState";
 import { ProgressBar } from "@/components/ui/ProgressBar";
 import { FinQuestApiError } from "@/lib/api/client";
-import { render, screen } from "@/tests/test-utils";
+import { renderWithQuery as render, screen } from "@/tests/test-utils";
 
 describe("ErrorState", () => {
   it("shows a friendly message and correlation-id reference for a backend error, never a stack trace", () => {

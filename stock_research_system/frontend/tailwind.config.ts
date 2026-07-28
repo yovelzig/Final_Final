@@ -43,11 +43,12 @@ const config: Config = {
       },
       fontFamily: {
         sans: [
-          "var(--font-inter)",
+          "var(--font-rubik)",
           "-apple-system",
           "BlinkMacSystemFont",
           "Segoe UI",
           "Roboto",
+          "Arial",
           "sans-serif",
         ],
       },

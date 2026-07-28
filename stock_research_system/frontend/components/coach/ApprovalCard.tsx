@@ -5,6 +5,7 @@ import { useState } from "react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import type { CoachStreamEvent } from "@/lib/api/coach-stream";
+import { useDictionary } from "@/providers/LocaleProvider";
 
 type ApprovalRequest = Extract<CoachStreamEvent, { type: "approval_required" }>;
 
@@ -26,28 +27,33 @@ export function ApprovalCard({
   onApprove: () => void;
   onReject: () => void;
 }) {
+  const t = useDictionary();
   const [announcement, setAnnouncement] = useState("");
   const isDecided = decision !== null;
 
   const handleApprove = () => {
-    setAnnouncement(`Approved: ${request.title}.`);
+    setAnnouncement(`${t.coach.approved}: ${request.title}.`);
     onApprove();
   };
   const handleReject = () => {
-    setAnnouncement(`Declined: ${request.title}.`);
+    setAnnouncement(`${t.coach.declined}: ${request.title}.`);
     onReject();
   };
 
   return (
-    <div className="flex flex-col gap-3 rounded-card border border-primary/30 bg-primary-light p-4" role="group" aria-label="Action approval">
+    <div
+      className="flex flex-col gap-3 rounded-card border border-primary/30 bg-primary-light p-4"
+      role="group"
+      aria-label={t.coach.approvalNeeded}
+    >
       <div className="flex items-center justify-between gap-2">
         <p className="text-sm font-semibold text-slate-900">{request.title}</p>
         {isDecided ? (
           <Badge tone={decision === "APPROVE" ? "success" : "neutral"}>
-            {decision === "APPROVE" ? "Approved" : "Declined"}
+            {decision === "APPROVE" ? t.coach.approved : t.coach.declined}
           </Badge>
         ) : (
-          <Badge tone="primary">Needs your approval</Badge>
+          <Badge tone="primary">{t.coach.approvalNeeded}</Badge>
         )}
       </div>
       <p className="text-sm text-slate-700">{request.description}</p>
@@ -56,10 +62,10 @@ export function ApprovalCard({
       {!isDecided ? (
         <div className="flex gap-2">
           <Button size="sm" onClick={handleApprove} isLoading={isSubmitting} disabled={isSubmitting}>
-            Approve
+            {t.coach.approve}
           </Button>
           <Button size="sm" variant="ghost" onClick={handleReject} isLoading={isSubmitting} disabled={isSubmitting}>
-            Not now
+            {t.coach.notNow}
           </Button>
         </div>
       ) : null}

@@ -1,7 +1,9 @@
 import type { ReactElement, ReactNode } from "react";
 import { vi } from "vitest";
 
+import type { Locale } from "@/lib/i18n/config";
 import { AuthContext, type AuthContextValue } from "@/providers/AuthProvider";
+import { LocaleProvider } from "@/providers/LocaleProvider";
 import { render } from "@/tests/test-utils";
 
 /** A fully-stubbed `AuthContextValue` for testing components that call
@@ -22,10 +24,18 @@ export function buildAuthContextValue(overrides?: Partial<AuthContextValue>): Au
   };
 }
 
-export function renderWithAuthContext(ui: ReactElement, overrides?: Partial<AuthContextValue>) {
+export function renderWithAuthContext(
+  ui: ReactElement,
+  overrides?: Partial<AuthContextValue>,
+  options?: { locale?: Locale }
+) {
   const value = buildAuthContextValue(overrides);
   function Wrapper({ children }: { children: ReactNode }) {
-    return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+    return (
+      <LocaleProvider initialLocale={options?.locale ?? "en"}>
+        <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
+      </LocaleProvider>
+    );
   }
   return { authValue: value, ...render(ui, { wrapper: Wrapper }) };
 }

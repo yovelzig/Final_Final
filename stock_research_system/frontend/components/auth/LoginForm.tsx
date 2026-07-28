@@ -11,10 +11,12 @@ import { FormField } from "@/components/ui/FormField";
 import { PasswordField } from "@/components/auth/PasswordField";
 import { FinQuestApiError } from "@/lib/api/client";
 import { useAuth } from "@/hooks/useAuth";
+import { useDictionary } from "@/providers/LocaleProvider";
 import { loginFormSchema, type LoginFormValues } from "@/lib/validation/auth";
 
 export function LoginForm() {
   const { login } = useAuth();
+  const t = useDictionary();
   const [submitError, setSubmitError] = useState<string | null>(null);
   const {
     register,
@@ -36,14 +38,14 @@ export function LoginForm() {
         // enumerating message for a locked account. Render it verbatim.
         setSubmitError(error.message);
       } else {
-        setSubmitError("Something went wrong. Please try again.");
+        setSubmitError(t.auth.login.genericError);
       }
     }
   };
 
   return (
     <form onSubmit={handleSubmit(onSubmit)} noValidate className="flex flex-col gap-4 rounded-card border border-border bg-surface p-6 shadow-sm">
-      <h1 className="text-xl font-bold text-slate-900">Log in</h1>
+      <h1 className="text-xl font-bold text-slate-900">{t.auth.login.title}</h1>
 
       {submitError ? (
         <Alert tone="danger" role="alert">
@@ -52,27 +54,29 @@ export function LoginForm() {
       ) : null}
 
       <FormField
-        label="Email"
+        label={t.auth.login.email}
         type="email"
         autoComplete="email"
         error={errors.email?.message}
         {...register("email")}
       />
       <PasswordField
-        label="Password"
+        label={t.auth.login.password}
         autoComplete="current-password"
+        showLabel={t.auth.passwordShow}
+        hideLabel={t.auth.passwordHide}
         error={errors.password?.message}
         {...register("password")}
       />
 
       <Button type="submit" isLoading={isSubmitting} className="mt-2 w-full">
-        Log in
+        {t.auth.login.submit}
       </Button>
 
       <p className="text-center text-sm text-muted">
-        New to FinQuest?{" "}
+        {t.auth.login.noAccount}{" "}
         <Link href="/register" className="font-medium text-primary hover:underline">
-          Create an account
+          {t.auth.login.createAccount}
         </Link>
       </p>
     </form>

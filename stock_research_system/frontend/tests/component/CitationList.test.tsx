@@ -2,7 +2,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
 import { CitationList } from "@/components/tutor/CitationList";
-import { render, screen } from "@/tests/test-utils";
+import { renderWithQuery as render, screen } from "@/tests/test-utils";
 
 const CITATIONS = [
   {
