@@ -180,18 +180,33 @@ export const he = {
       misconceptionsOne: "תפיסה שגויה אחת פעילה לסקירה",
       misconceptionsOther: "{count} תפיסות שגויות פעילות לסקירה",
     },
-    mastery: {
-      title: "שליטה במיומנויות",
-      description: "כיצד אתם מתקדמים במיומנויות שהוערכו.",
+    financialSkills: {
+      title: "התקדמות במיומנויות פיננסיות",
+      description: "ראו כיצד ההבנה שלכם מתפתחת בנושאי היסוד של השקעות ושוק ההון.",
       emptyTitle: "עדיין לא הוערכו מיומנויות",
       emptyDescription: "השלימו שיעור או מבחן אבחון כדי להתחיל לבנות את פרופיל המיומנויות שלכם.",
-      skillLabel: "מיומנות",
+      fallbackSkillName: "נושא פיננסי",
       levels: {
-        NOT_ASSESSED: "לא הוערך",
-        NOVICE: "מתחיל",
-        DEVELOPING: "מתפתח",
-        PROFICIENT: "בקיא",
-        MASTERED: "שולט",
+        NOT_ASSESSED: "טרם התחלתם",
+        NOVICE: "צעדים ראשונים",
+        DEVELOPING: "בונים ביטחון",
+        PROFICIENT: "הבנה טובה",
+        MASTERED: "שליטה מלאה",
+      },
+      // Hebrew for the same canonical curriculum skills as `en.ts` - a
+      // skill missing here still renders, under its English name.
+      skillNames: {
+        MONEY_BASICS: "יסודות הכסף",
+        INFLATION: "אינפלציה",
+        COMPOUND_INTEREST: "ריבית דריבית",
+        STOCKS: "מניות",
+        BONDS: "אגרות חוב",
+        FUNDS_AND_ETFS: "קרנות וקרנות סל",
+        RISK_AND_RETURN: "סיכון ותשואה",
+        DIVERSIFICATION: "פיזור השקעות",
+        MARKET_INDEXES: "מדדי שוק",
+        CHART_READING: "קריאת גרפים",
+        LONG_TERM_INVESTING: "השקעה לטווח ארוך",
       },
     },
     portfolio: {

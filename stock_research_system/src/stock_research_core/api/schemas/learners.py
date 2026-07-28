@@ -8,6 +8,7 @@ from uuid import UUID
 from pydantic import Field
 
 from stock_research_core.api.schemas.common import ApiSchema
+from stock_research_core.application.learning.models import SkillMasterySummary
 from stock_research_core.domain.learning.enums import (
     DifficultyLevel,
     MasteryLevel,
@@ -47,7 +48,19 @@ class LearnerUpdateRequest(ApiSchema):
 
 
 class SkillMasteryResponse(ApiSchema):
+    """One skill's mastery, including the canonical skill name so a client
+    never has to resolve (or display) the raw `skill_id`.
+
+    `skill_name`/`skill_code` are read from `financial_skills`, which stays
+    their single source of truth - nothing here is stored on the mastery
+    row. They are `null` only for a mastery row whose skill no longer
+    exists, and on `SubmitAnswerResponse.updated_mastery`, which reports
+    what the just-graded answer changed rather than a browsable list.
+    """
+
     skill_id: UUID
+    skill_name: str | None = None
+    skill_code: str | None = None
     mastery_score: float
     mastery_level: MasteryLevel
     correct_attempts: int
@@ -61,6 +74,12 @@ class SkillMasteryResponse(ApiSchema):
             skill_id=mastery.skill_id, mastery_score=mastery.mastery_score, mastery_level=mastery.mastery_level,
             correct_attempts=mastery.correct_attempts, total_attempts=mastery.total_attempts,
             last_practiced_at=mastery.last_practiced_at, next_review_at=mastery.next_review_at,
+        )
+
+    @staticmethod
+    def from_summary(summary: SkillMasterySummary) -> SkillMasteryResponse:
+        return SkillMasteryResponse.from_domain(summary.mastery).model_copy(
+            update={"skill_name": summary.skill_name, "skill_code": summary.skill_code}
         )
 
 

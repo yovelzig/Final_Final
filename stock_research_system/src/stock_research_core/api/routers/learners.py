@@ -71,7 +71,7 @@ async def get_my_dashboard(
         current_lesson_id=dashboard.current_lesson.lesson_id if dashboard.current_lesson else None,
         completed_lessons=dashboard.completed_lessons, total_lessons=dashboard.total_lessons,
         current_streak_days=dashboard.current_streak_days, total_xp=dashboard.total_xp,
-        skill_mastery=[SkillMasteryResponse.from_domain(m) for m in dashboard.skill_mastery],
+        skill_mastery=[SkillMasteryResponse.from_summary(m) for m in dashboard.skill_mastery],
         active_misconceptions=[MisconceptionResponse.from_domain(m) for m in dashboard.active_misconceptions],
     )
 
@@ -83,9 +83,9 @@ async def list_my_mastery(
     params: Annotated[PaginationParams, Depends(pagination_params)],
 ) -> PaginatedResponse[SkillMasteryResponse]:
     async with uow_factory() as uow:
-        all_mastery = await uow.mastery.list_for_learner(learner_id)
+        all_mastery = await uow.mastery.list_for_learner_with_skill(learner_id)
     page = all_mastery[params.offset : params.offset + params.limit]
-    return paginated(items=[SkillMasteryResponse.from_domain(m) for m in page], total=len(all_mastery), params=params)
+    return paginated(items=[SkillMasteryResponse.from_summary(m) for m in page], total=len(all_mastery), params=params)
 
 
 @router.get("/learners/me/progress", response_model=PaginatedResponse[ProgressResponse], summary="List my lesson/module/path progress")

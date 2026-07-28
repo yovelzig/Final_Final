@@ -435,7 +435,7 @@ class LearningService:
                         if current_lesson is None and lesson.lesson_id not in completed_lesson_ids:
                             current_lesson = lesson
 
-            skill_mastery = await uow.mastery.list_for_learner(learner_id)
+            skill_mastery = await uow.mastery.list_for_learner_with_skill(learner_id)
             active_misconceptions = await uow.misconceptions.list_active(learner_id)
 
         return LearnerDashboard(

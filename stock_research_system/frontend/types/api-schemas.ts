@@ -21,6 +21,7 @@ export type LearnerProfileResponse = components["schemas"]["LearnerProfileRespon
 export type LearnerUpdateRequest = components["schemas"]["LearnerUpdateRequest"];
 export type DashboardResponse = components["schemas"]["DashboardResponse"];
 export type SkillMasteryResponse = components["schemas"]["SkillMasteryResponse"];
+export type MasteryLevel = components["schemas"]["MasteryLevel"];
 export type ProgressResponse = components["schemas"]["ProgressResponse"];
 export type MisconceptionResponse = components["schemas"]["MisconceptionResponse"];
 export type PaginatedSkillMasteryResponse = components["schemas"]["PaginatedResponse_SkillMasteryResponse_"];

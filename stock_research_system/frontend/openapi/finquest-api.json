@@ -945,7 +945,8 @@
           "SYSTEM_MAINTENANCE",
           "RAGAS_QUALITY_EVALUATION",
           "LEARNING_QUALITY_AGGREGATION",
-          "QUALITY_BASELINE_COMPARISON"
+          "QUALITY_BASELINE_COMPARISON",
+          "LIVE_RESEARCH_RUN_EXECUTION"
         ],
         "title": "BackgroundJobType",
         "type": "string"
@@ -1861,6 +1862,129 @@
           "notes"
         ],
         "title": "EvaluationRegressionReportResponse",
+        "type": "object"
+      },
+      "EvidenceClassification": {
+        "enum": [
+          "OFFICIAL",
+          "NON_OFFICIAL"
+        ],
+        "title": "EvidenceClassification",
+        "type": "string"
+      },
+      "EvidenceItemSummary": {
+        "additionalProperties": false,
+        "description": "A bounded, provenance-safe view of one `EvidenceItem`. Excludes\n`raw_excerpt`, `normalized_text`, `structured_facts`, and any\nprovider metadata - never a raw provider response.",
+        "properties": {
+          "classification": {
+            "$ref": "#/components/schemas/EvidenceClassification"
+          },
+          "evidence_id": {
+            "format": "uuid",
+            "title": "Evidence Id",
+            "type": "string"
+          },
+          "official_identifier": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Official Identifier"
+          },
+          "published_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Published At"
+          },
+          "publisher": {
+            "title": "Publisher",
+            "type": "string"
+          },
+          "source_title": {
+            "title": "Source Title",
+            "type": "string"
+          },
+          "source_type": {
+            "$ref": "#/components/schemas/SourceType"
+          },
+          "source_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Url"
+          }
+        },
+        "required": [
+          "evidence_id",
+          "source_type",
+          "classification",
+          "source_title",
+          "publisher"
+        ],
+        "title": "EvidenceItemSummary",
+        "type": "object"
+      },
+      "EvidencePageResponse": {
+        "additionalProperties": false,
+        "description": "A single database-paginated page of `EvidenceItemSummary` rows for\none completed `ResearchRun`. `has_more` is `True` only when the\nrepository returned an extra (`limit + 1`-th) row - the router never\nissues an unbounded query or a separate `COUNT(*)`.",
+        "properties": {
+          "has_more": {
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/EvidenceItemSummary"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "maximum": 50.0,
+            "minimum": 1.0,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "next_offset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Offset"
+          },
+          "offset": {
+            "minimum": 0.0,
+            "title": "Offset",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "limit",
+          "offset",
+          "has_more"
+        ],
+        "title": "EvidencePageResponse",
         "type": "object"
       },
       "Exchange": {
@@ -6846,6 +6970,7 @@
       },
       "SkillMasteryResponse": {
         "additionalProperties": false,
+        "description": "One skill's mastery, including the canonical skill name so a client\nnever has to resolve (or display) the raw `skill_id`.\n\n`skill_name`/`skill_code` are read from `financial_skills`, which stays\ntheir single source of truth - nothing here is stored on the mastery\nrow. They are `null` only for a mastery row whose skill no longer\nexists, and on `SubmitAnswerResponse.updated_mastery`, which reports\nwhat the just-graded answer changed rather than a browsable list.",
         "properties": {
           "correct_attempts": {
             "title": "Correct Attempts",
@@ -6882,10 +7007,32 @@
             ],
             "title": "Next Review At"
           },
+          "skill_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Skill Code"
+          },
           "skill_id": {
             "format": "uuid",
             "title": "Skill Id",
             "type": "string"
+          },
+          "skill_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Skill Name"
           },
           "total_attempts": {
             "title": "Total Attempts",
@@ -6955,6 +7102,19 @@
         ],
         "title": "SkillResponse",
         "type": "object"
+      },
+      "SourceType": {
+        "enum": [
+          "SEC_OFFICIAL_FILING",
+          "COMPANY_INVESTOR_RELATIONS",
+          "EXCHANGE_REGULATOR_GOVERNMENT",
+          "STRUCTURED_MARKET_DATA_PROVIDER",
+          "REPUTABLE_SECONDARY_SOURCE",
+          "DISCOVERY_ONLY",
+          "UNKNOWN_UNVERIFIED"
+        ],
+        "title": "SourceType",
+        "type": "string"
       },
       "StartAttemptRequest": {
         "additionalProperties": false,
@@ -11874,6 +12034,104 @@
           }
         },
         "summary": "Poll safe job events for a job this integration client created",
+        "tags": [
+          "n8n Integration"
+        ]
+      }
+    },
+    "/api/v1/integrations/n8n/jobs/{job_id}/live-research/evidence": {
+      "get": {
+        "operationId": "get_job_live_research_evidence_api_v1_integrations_n8n_jobs__job_id__live_research_evidence_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "maximum": 50,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-finquest-key-id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Finquest-Key-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-finquest-integration-key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Finquest-Integration-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvidencePageResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get a bounded, provenance-safe evidence page for a completed Live Research job this integration client created",
         "tags": [
           "n8n Integration"
         ]

@@ -4,15 +4,25 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, nulls_last, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from stock_research_core.application.learning.models import SkillMasterySummary
 from stock_research_core.domain.learning.models import SkillMastery
 from stock_research_core.infrastructure.database.mappers.learning_mappers import (
     skill_mastery_orm_to_domain,
 )
+from stock_research_core.infrastructure.database.orm.skill import FinancialSkillORM
 from stock_research_core.infrastructure.database.orm.skill_mastery import SkillMasteryORM
+from stock_research_core.infrastructure.operations.structured_logging import get_logger
+
+_logger = get_logger(__name__)
+
+#: How many orphaned skill IDs a single diagnostic warning may name. The
+#: warning is emitted once per query, so a learner with hundreds of legacy
+#: rows still produces one bounded log line.
+_MISSING_SKILL_SAMPLE_SIZE = 5
 
 
 class SqlAlchemyMasteryRepository:
@@ -67,3 +77,44 @@ class SqlAlchemyMasteryRepository:
         statement = select(SkillMasteryORM).where(SkillMasteryORM.learner_id == learner_id)
         result = await self._session.execute(statement)
         return [skill_mastery_orm_to_domain(row) for row in result.scalars().all()]
+
+    async def list_for_learner_with_skill(self, learner_id: UUID) -> list[SkillMasterySummary]:
+        """One `LEFT JOIN` against `financial_skills` - never a per-row
+        skill lookup - ordered by canonical skill name so pagination over
+        the result is stable.
+
+        The join is outer, so a mastery row whose skill has since been
+        deleted still comes back (with no name) instead of vanishing from
+        the learner's progress. Retired (`active = false`) skills keep
+        their name too: the learner did practise them. Only the name and
+        code are read; descriptions and other curriculum authoring
+        metadata stay out of learner-facing responses.
+        """
+        statement = (
+            select(SkillMasteryORM, FinancialSkillORM.name, FinancialSkillORM.code)
+            .outerjoin(FinancialSkillORM, FinancialSkillORM.skill_id == SkillMasteryORM.skill_id)
+            .where(SkillMasteryORM.learner_id == learner_id)
+            .order_by(nulls_last(FinancialSkillORM.name), SkillMasteryORM.skill_id)
+        )
+        result = await self._session.execute(statement)
+        summaries = [
+            SkillMasterySummary(
+                mastery=skill_mastery_orm_to_domain(mastery_row),
+                skill_name=skill_name,
+                skill_code=skill_code,
+            )
+            for mastery_row, skill_name, skill_code in result.all()
+        ]
+
+        orphaned_skill_ids = [
+            summary.mastery.skill_id for summary in summaries if summary.skill_name is None
+        ]
+        if orphaned_skill_ids:
+            _logger.warning(
+                "skill_mastery_skill_metadata_missing",
+                missing_count=len(orphaned_skill_ids),
+                sample_skill_ids=[
+                    str(skill_id) for skill_id in orphaned_skill_ids[:_MISSING_SKILL_SAMPLE_SIZE]
+                ],
+            )
+        return summaries
