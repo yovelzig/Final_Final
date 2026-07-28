@@ -31,6 +31,7 @@ from stock_research_core.application.ai_tutor.scenario_tutor import ScenarioTuto
 from stock_research_core.application.ai_tutor.service import GroundedAITutorService
 from stock_research_core.application.exceptions import StockResearchError
 from stock_research_core.application.learning_orchestrator.ports import LearningContextLoaderPort
+from stock_research_core.application.learning_orchestrator.nodes import prepared_language_from_state
 from stock_research_core.application.learning_orchestrator.state import LearningCoachGraphState, bounded_list
 from stock_research_core.domain.adaptive_learning.enums import LearningSessionType
 from stock_research_core.domain.ai_tutor.enums import TutorContextType
@@ -100,7 +101,10 @@ class Subgraphs:
             context = TutorContext(context_type=TutorContextType.GENERAL_EDUCATION, learner_id=learner_id)
             conversation = await self._deps.tutor_service.create_conversation(learner_id=learner_id, context=context)
             conversation_id = conversation.conversation_id
-        response = await self._deps.tutor_service.ask(conversation_id=conversation_id, question=state["user_input"])
+        response = await self._deps.tutor_service.ask(
+            conversation_id=conversation_id, question=state["user_input"],
+            prepared_language=prepared_language_from_state(state),
+        )
         return _tutor_response_to_state(response, conversation_id=conversation_id)
 
     # -- 14.2 lesson tutor -----------------------------------------------
@@ -117,7 +121,8 @@ class Subgraphs:
             )
             conversation_id = conversation.conversation_id
         response = await self._deps.lesson_tutor_service.ask(
-            conversation_id=conversation_id, question=state["user_input"]
+            conversation_id=conversation_id, question=state["user_input"],
+            prepared_language=prepared_language_from_state(state),
         )
         return _tutor_response_to_state(response, conversation_id=conversation_id)
 
@@ -137,7 +142,8 @@ class Subgraphs:
             )
             conversation_id = conversation.conversation_id
         response = await self._deps.lesson_tutor_service.ask(
-            conversation_id=conversation_id, question=state["user_input"], exercise_submitted=exercise_submitted
+            conversation_id=conversation_id, question=state["user_input"], exercise_submitted=exercise_submitted,
+            prepared_language=prepared_language_from_state(state),
         )
         return _tutor_response_to_state(response, conversation_id=conversation_id)
 
@@ -180,6 +186,7 @@ class Subgraphs:
                 context_type=TutorContextType.GENERAL_EDUCATION, learner_id=learner_id,
                 structured_context=structured_context,
             ),
+            prepared_language=prepared_language_from_state(state),
         )
         result = _tutor_response_to_state(response, conversation_id=conversation_id)
         result.update(
@@ -215,6 +222,7 @@ class Subgraphs:
                 context_type=TutorContextType.GENERAL_EDUCATION, learner_id=learner_id,
                 structured_context=structured_context,
             ),
+            prepared_language=prepared_language_from_state(state),
         )
         result = _tutor_response_to_state(response, conversation_id=conversation_id)
         result["learner_dashboard"] = dashboard
@@ -262,7 +270,8 @@ class Subgraphs:
             )
             conversation_id = conversation.conversation_id
         response = await self._deps.scenario_tutor_service.ask(
-            conversation_id=conversation_id, question=state["user_input"]
+            conversation_id=conversation_id, question=state["user_input"],
+            prepared_language=prepared_language_from_state(state),
         )
         return _tutor_response_to_state(response, conversation_id=conversation_id)
 
@@ -280,7 +289,8 @@ class Subgraphs:
             )
             conversation_id = conversation.conversation_id
         response = await self._deps.scenario_tutor_service.ask(
-            conversation_id=conversation_id, question=state["user_input"]
+            conversation_id=conversation_id, question=state["user_input"],
+            prepared_language=prepared_language_from_state(state),
         )
         return _tutor_response_to_state(response, conversation_id=conversation_id)
 
@@ -298,6 +308,7 @@ class Subgraphs:
             )
             conversation_id = conversation.conversation_id
         response = await self._deps.portfolio_tutor_service.ask(
-            conversation_id=conversation_id, question=state["user_input"]
+            conversation_id=conversation_id, question=state["user_input"],
+            prepared_language=prepared_language_from_state(state),
         )
         return _tutor_response_to_state(response, conversation_id=conversation_id)

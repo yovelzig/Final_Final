@@ -54,6 +54,9 @@ class FakeTutorService:
     def __init__(self) -> None:
         self.created_contexts: list[TutorContext] = []
         self.asked: list[tuple] = []
+        #: Phase G2E2A: the Coach's already-made language preparation,
+        #: passed through so no route translates the same text twice.
+        self.prepared_languages: list[object] = []
 
     async def create_conversation(self, *, learner_id, context: TutorContext):
         self.created_contexts.append(context)
@@ -62,8 +65,9 @@ class FakeTutorService:
             exercise_id=context.exercise_id,
         )
 
-    async def ask(self, *, conversation_id, question, top_k=8, context=None):
+    async def ask(self, *, conversation_id, question, top_k=8, context=None, prepared_language=None):
         self.asked.append((conversation_id, question, context))
+        self.prepared_languages.append(prepared_language)
         return "fake-response"
 
 

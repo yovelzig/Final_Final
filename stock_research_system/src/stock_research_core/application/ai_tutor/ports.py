@@ -21,6 +21,7 @@ from stock_research_core.application.ai_tutor.models import (
     TutorModelRequest,
     TutorModelResult,
 )
+from stock_research_core.application.language.enums import DetectedLanguage
 from stock_research_core.domain.ai_tutor.enums import (
     GroundingStatus,
     KnowledgeIngestionRunStatus,
@@ -85,7 +86,13 @@ class TutorGuardrailPort(Protocol):
     """Deterministic input/output safety policy for the tutor."""
 
     def evaluate_input(
-        self, *, conversation_id: UUID, message: TutorMessage, context: TutorContext
+        self,
+        *,
+        conversation_id: UUID,
+        message: TutorMessage,
+        context: TutorContext,
+        language: DetectedLanguage = DetectedLanguage.EN,
+        apply_topic_vocabulary_check: bool = True,
     ) -> TutorGuardrailDecision: ...
 
     def validate_output(
@@ -121,6 +128,7 @@ class TutorPromptBuilderPort(Protocol):
         conversation_messages: list[TutorMessage],
         candidates: list[RetrievalCandidate],
         context: TutorContext,
+        language: DetectedLanguage = DetectedLanguage.EN,
     ) -> TutorModelRequest: ...
 
 

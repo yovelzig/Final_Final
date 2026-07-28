@@ -44,6 +44,19 @@ class LearningCoachGraphState(TypedDict, total=False):
     requested_context_type: str
     context_references: dict[str, str]
 
+    # -- language (Phase G2E2A) -----------------------------------------------
+    #
+    # The result of this run's ONE bounded language-query preparation,
+    # written once by `evaluate_input_guardrail` and read (never rewritten)
+    # by `classify_intent`, `build_refusal_response`,
+    # `build_fallback_response`, and every route that reaches a tutor
+    # service. `user_input` above is never modified by it. Plain,
+    # JSON-serializable keys only: `detected_language` (`"EN"`/`"HE"`),
+    # `intent_query` (the bounded English query - never shown to the
+    # learner, never persisted as their message, never a citation),
+    # `translation_attempted`, and `translation_failed`.
+    language_preparation: dict[str, Any]
+
     # -- routing -----------------------------------------------
     intent_classification: dict[str, Any]
     selected_route: str

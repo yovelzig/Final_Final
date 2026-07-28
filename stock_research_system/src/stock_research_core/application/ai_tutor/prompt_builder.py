@@ -12,10 +12,19 @@ are defined, so every provider sees the same boundary rules).
 from __future__ import annotations
 
 from stock_research_core.application.ai_tutor.models import RetrievalCandidate, TutorContext, TutorModelRequest
+from stock_research_core.application.language.enums import DetectedLanguage
 from stock_research_core.domain.ai_tutor.enums import TutorContextType
 from stock_research_core.domain.ai_tutor.models import TutorMessage
 
 PROMPT_VERSION = "grounded-tutor-prompt-v1"
+
+_HEBREW_ANSWER_LANGUAGE_INSTRUCTION = (
+    "\n10. The learner asked their question in Hebrew. Answer entirely in Hebrew (עברית), "
+    "matching the language they asked in, even though the retrieved evidence above is in "
+    "English - translate the relevant facts faithfully into Hebrew without adding anything "
+    "not present in the evidence. The citation excerpts shown to the learner will remain in "
+    "English; you do not need to translate them yourself, only your own answer text.\n"
+)
 
 _BASE_SYSTEM_INSTRUCTIONS = """You are the FinQuest financial-education tutor. Follow these rules strictly:
 
@@ -93,11 +102,14 @@ class GroundedTutorPromptBuilder:
         conversation_messages: list[TutorMessage],
         candidates: list[RetrievalCandidate],
         context: TutorContext,
+        language: DetectedLanguage = DetectedLanguage.EN,
     ) -> TutorModelRequest:
         instructions = _BASE_SYSTEM_INSTRUCTIONS
         guidance = _CONTEXT_TYPE_GUIDANCE.get(context.context_type)
         if guidance:
             instructions += f"\nContext-specific rule: {guidance}\n"
+        if language == DetectedLanguage.HE:
+            instructions += _HEBREW_ANSWER_LANGUAGE_INSTRUCTION
 
         instructions += (
             f"\nRetrieved approved evidence (cite by bracket number, only using chunk IDs listed "

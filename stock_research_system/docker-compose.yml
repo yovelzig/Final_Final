@@ -102,6 +102,20 @@ services:
       TUTOR_KNOWLEDGE_SUFFICIENCY_MIN_VECTOR_SCORE: ${TUTOR_KNOWLEDGE_SUFFICIENCY_MIN_VECTOR_SCORE:-0.52}
       TUTOR_KNOWLEDGE_SUFFICIENCY_MIN_LEXICAL_SCORE: ${TUTOR_KNOWLEDGE_SUFFICIENCY_MIN_LEXICAL_SCORE:-0.05}
       TUTOR_KNOWLEDGE_SUFFICIENCY_MIN_CONTEXT_METADATA_SCORE: ${TUTOR_KNOWLEDGE_SUFFICIENCY_MIN_CONTEXT_METADATA_SCORE:-0.90}
+      # Phase G2E2A: the ONE shared Hebrew-query-bridge switch, used by the
+      # Tutor, the LangGraph learning coach, AND Live Research - there is
+      # deliberately no separate Tutor-only flag. Disabled by default
+      # (safe, rollback-neutral: existing English behavior is unchanged).
+      # The three LANGUAGE_SERVICE_* credential variables are optional
+      # overrides only - left blank, translation reuses whichever
+      # TUTOR_MODEL_* provider is already configured above, so no second
+      # copy of the same Ollama/OpenAI API key is needed.
+      HEBREW_QUERY_BRIDGE_ENABLED: ${HEBREW_QUERY_BRIDGE_ENABLED:-false}
+      LANGUAGE_SERVICE_PROVIDER: ${LANGUAGE_SERVICE_PROVIDER:-unavailable}
+      LANGUAGE_SERVICE_BASE_URL: "${LANGUAGE_SERVICE_BASE_URL:-}"
+      LANGUAGE_SERVICE_API_KEY: "${LANGUAGE_SERVICE_API_KEY:-}"
+      LANGUAGE_SERVICE_MODEL_NAME: "${LANGUAGE_SERVICE_MODEL_NAME:-}"
+      LANGUAGE_SERVICE_TIMEOUT_SECONDS: ${LANGUAGE_SERVICE_TIMEOUT_SECONDS:-15}
       FINQUEST_ENV: ${FINQUEST_ENV:-development}
       ALLOW_FAKE_EMBEDDINGS_IN_PRODUCTION: ${ALLOW_FAKE_EMBEDDINGS_IN_PRODUCTION:-false}
       REDIS_URL: redis://redis:6379/0
@@ -344,6 +358,25 @@ services:
       LIVE_RESEARCH_SEC_BASE_URL: ${LIVE_RESEARCH_SEC_BASE_URL:-https://data.sec.gov}
       LIVE_RESEARCH_SEC_TIMEOUT_SECONDS: ${LIVE_RESEARCH_SEC_TIMEOUT_SECONDS:-30.0}
       LIVE_RESEARCH_SEC_REQUESTS_PER_SECOND: ${LIVE_RESEARCH_SEC_REQUESTS_PER_SECOND:-5.0}
+      # Phase G2E2A: LIVE_RESEARCH_RUN_EXECUTION runs in THIS worker, not
+      # in finquest-api, so the shared Hebrew-query-bridge switch and its
+      # optional credential overrides must be enumerated here too - the
+      # worker composition root loads them itself (celery_tasks.
+      # _build_worker_context). Same variables, same single flag, same
+      # disabled-by-default value as finquest-api.
+      HEBREW_QUERY_BRIDGE_ENABLED: ${HEBREW_QUERY_BRIDGE_ENABLED:-false}
+      LANGUAGE_SERVICE_PROVIDER: ${LANGUAGE_SERVICE_PROVIDER:-unavailable}
+      LANGUAGE_SERVICE_BASE_URL: "${LANGUAGE_SERVICE_BASE_URL:-}"
+      LANGUAGE_SERVICE_API_KEY: "${LANGUAGE_SERVICE_API_KEY:-}"
+      LANGUAGE_SERVICE_MODEL_NAME: "${LANGUAGE_SERVICE_MODEL_NAME:-}"
+      LANGUAGE_SERVICE_TIMEOUT_SECONDS: ${LANGUAGE_SERVICE_TIMEOUT_SECONDS:-15}
+      # Reused for translation credentials when the LANGUAGE_SERVICE_*
+      # overrides above are left blank (see infrastructure.language.
+      # composition) - never a second copy of the same API key.
+      TUTOR_MODEL_PROVIDER: ${TUTOR_MODEL_PROVIDER:-extractive}
+      TUTOR_MODEL_BASE_URL: "${TUTOR_MODEL_BASE_URL:-}"
+      TUTOR_MODEL_API_KEY: "${TUTOR_MODEL_API_KEY:-}"
+      TUTOR_MODEL_NAME: "${TUTOR_MODEL_NAME:-}"
     # Low bounded concurrency: each task makes outbound Perplexity Search /
     # SEC EDGAR calls - I/O-bound and rate-sensitive against those
     # upstream providers, same shape as finquest-worker-market.
