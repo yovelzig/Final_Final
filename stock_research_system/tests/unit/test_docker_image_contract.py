@@ -273,6 +273,125 @@ class TestComposeKnowledgeSufficiencyEnvironmentVariables:
             )
 
 
+_LANGUAGE_SERVICE_ENV_VAR_NAMES = (
+    "HEBREW_QUERY_BRIDGE_ENABLED",
+    "LANGUAGE_SERVICE_PROVIDER",
+    "LANGUAGE_SERVICE_BASE_URL",
+    "LANGUAGE_SERVICE_API_KEY",
+    "LANGUAGE_SERVICE_MODEL_NAME",
+    "LANGUAGE_SERVICE_TIMEOUT_SECONDS",
+)
+#: Phase G2E2A: unlike the Tutor-only settings above, the Hebrew query
+#: bridge spans processes - `finquest-api` serves the Tutor and the
+#: LangGraph coach, and `finquest-worker-research` executes
+#: `LIVE_RESEARCH_RUN_EXECUTION` with its own composition root - so
+#: exactly these two services carry the variables.
+_LANGUAGE_SERVICE_SERVICE_NAMES = ("finquest-api", "finquest-worker-research")
+_ENV_PRODUCTION_EXAMPLE = (_REPO_ROOT / ".env.production.example").read_text(encoding="utf-8")
+
+
+class TestComposeLanguageServiceEnvironmentVariables:
+    """Phase G2E2A: ONE shared feature flag (`HEBREW_QUERY_BRIDGE_ENABLED`)
+    reaching both processes that consume the bridge, disabled by default,
+    with no committed key and no second Tutor-only flag name."""
+
+    @pytest.mark.parametrize("compose_name,compose_text", [("dev", _DEV_COMPOSE), ("production", _PRODUCTION_COMPOSE)])
+    @pytest.mark.parametrize("service_name", _LANGUAGE_SERVICE_SERVICE_NAMES)
+    def test_all_six_variables_present(self, compose_name: str, compose_text: str, service_name: str) -> None:
+        block = _service_block_in(compose_text, service_name)
+        for var_name in _LANGUAGE_SERVICE_ENV_VAR_NAMES:
+            assert re.search(rf"(?m)^\s+{var_name}:", block), (
+                f"{var_name} missing from {service_name} in {compose_name} compose file"
+            )
+
+    @pytest.mark.parametrize("compose_name,compose_text", [("dev", _DEV_COMPOSE), ("production", _PRODUCTION_COMPOSE)])
+    def test_no_language_variable_present_on_unrelated_services(
+        self, compose_name: str, compose_text: str
+    ) -> None:
+        for service_name in _NON_API_SERVICE_NAMES:
+            block = _service_block_in(compose_text, service_name)
+            for var_name in _LANGUAGE_SERVICE_ENV_VAR_NAMES:
+                assert not re.search(rf"(?m)^\s+{var_name}:", block), (
+                    f"{var_name} unexpectedly present on {service_name} in {compose_name} compose file"
+                )
+
+    @pytest.mark.parametrize("compose_name,compose_text", [("dev", _DEV_COMPOSE), ("production", _PRODUCTION_COMPOSE)])
+    @pytest.mark.parametrize("service_name", _LANGUAGE_SERVICE_SERVICE_NAMES)
+    def test_bridge_defaults_to_disabled(self, compose_name: str, compose_text: str, service_name: str) -> None:
+        block = _service_block_in(compose_text, service_name)
+        match = re.search(
+            r"(?m)^\s+HEBREW_QUERY_BRIDGE_ENABLED:\s*\$\{HEBREW_QUERY_BRIDGE_ENABLED:-(\S+)\}", block
+        )
+        assert match is not None, (
+            f"HEBREW_QUERY_BRIDGE_ENABLED has no shell default on {service_name} in {compose_name} compose file"
+        )
+        assert match.group(1) == "false", (
+            f"HEBREW_QUERY_BRIDGE_ENABLED must default to false on {service_name} in {compose_name} "
+            f"compose file, found {match.group(1)!r}"
+        )
+
+    @pytest.mark.parametrize("compose_name,compose_text", [("dev", _DEV_COMPOSE), ("production", _PRODUCTION_COMPOSE)])
+    @pytest.mark.parametrize("service_name", _LANGUAGE_SERVICE_SERVICE_NAMES)
+    def test_provider_defaults_to_unavailable(self, compose_name: str, compose_text: str, service_name: str) -> None:
+        block = _service_block_in(compose_text, service_name)
+        match = re.search(r"(?m)^\s+LANGUAGE_SERVICE_PROVIDER:\s*\$\{LANGUAGE_SERVICE_PROVIDER:-(\S+)\}", block)
+        assert match is not None, (
+            f"LANGUAGE_SERVICE_PROVIDER has no shell default on {service_name} in {compose_name} compose file"
+        )
+        assert match.group(1) == "unavailable", (
+            f"LANGUAGE_SERVICE_PROVIDER must default to unavailable on {service_name} in {compose_name} "
+            f"compose file, found {match.group(1)!r}"
+        )
+
+    @pytest.mark.parametrize("compose_name,compose_text", [("dev", _DEV_COMPOSE), ("production", _PRODUCTION_COMPOSE)])
+    @pytest.mark.parametrize("service_name", _LANGUAGE_SERVICE_SERVICE_NAMES)
+    def test_api_key_has_no_real_secret_hardcoded(
+        self, compose_name: str, compose_text: str, service_name: str
+    ) -> None:
+        block = _service_block_in(compose_text, service_name)
+        match = re.search(
+            r'(?m)^\s+LANGUAGE_SERVICE_API_KEY:\s*"?\$\{LANGUAGE_SERVICE_API_KEY:-([^}]*)\}"?', block
+        )
+        assert match is not None, (
+            f"LANGUAGE_SERVICE_API_KEY has no shell-default form on {service_name} in {compose_name} compose file"
+        )
+        assert match.group(1) == "", (
+            f"LANGUAGE_SERVICE_API_KEY must default to empty on {service_name} in {compose_name} compose file, "
+            f"found a hardcoded default {match.group(1)!r}"
+        )
+
+    @pytest.mark.parametrize(
+        "file_name,file_text",
+        [
+            ("dev compose", _DEV_COMPOSE),
+            ("production compose", _PRODUCTION_COMPOSE),
+            (".env.production.example", _ENV_PRODUCTION_EXAMPLE),
+        ],
+    )
+    def test_no_second_tutor_only_flag_name_survives(self, file_name: str, file_text: str) -> None:
+        """One authoritative switch: the earlier Tutor-scoped name must not
+        reappear anywhere, or an operator could enable the bridge for the
+        Tutor while silently leaving Live Research disabled."""
+        assert "TUTOR_LANGUAGE_SERVICE_ENABLED" not in file_text, (
+            f"TUTOR_LANGUAGE_SERVICE_ENABLED must not exist in {file_name} - "
+            "HEBREW_QUERY_BRIDGE_ENABLED is the single shared flag"
+        )
+
+    def test_env_production_example_documents_the_disabled_default(self) -> None:
+        assert re.search(r"(?m)^HEBREW_QUERY_BRIDGE_ENABLED=false$", _ENV_PRODUCTION_EXAMPLE)
+
+    def test_env_production_example_enumerates_every_variable(self) -> None:
+        for var_name in _LANGUAGE_SERVICE_ENV_VAR_NAMES:
+            assert re.search(rf"(?m)^{var_name}=", _ENV_PRODUCTION_EXAMPLE), (
+                f"{var_name} missing from .env.production.example"
+            )
+
+    def test_env_production_example_commits_no_translation_key(self) -> None:
+        assert re.search(r"(?m)^LANGUAGE_SERVICE_API_KEY=$", _ENV_PRODUCTION_EXAMPLE), (
+            "LANGUAGE_SERVICE_API_KEY must be blank in the committed template"
+        )
+
+
 class TestProductionComposeBuildTargets:
     def test_every_service_target_matches_the_expected_contract(self) -> None:
         for service_name, expected_target in _WORKER_TARGET_CONTRACT.items():

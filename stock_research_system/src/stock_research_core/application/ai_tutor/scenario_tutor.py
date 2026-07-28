@@ -28,6 +28,7 @@ from stock_research_core.application.exceptions import (
     ScenarioSubmissionNotFoundError,
     TutorConversationNotFoundError,
 )
+from stock_research_core.application.language.query_preparation import LanguageQueryPreparation
 from stock_research_core.application.market_scenarios.service import HistoricalMarketScenarioService
 from stock_research_core.domain.ai_tutor.enums import TutorContextType
 from stock_research_core.domain.ai_tutor.models import TutorConversation
@@ -99,7 +100,14 @@ class ScenarioTutorService:
         )
         return await self._tutor_service.create_conversation(learner_id=learner_id, context=context)
 
-    async def ask(self, *, conversation_id: UUID, question: str, top_k: int = 8) -> TutorResponse:
+    async def ask(
+        self,
+        *,
+        conversation_id: UUID,
+        question: str,
+        top_k: int = 8,
+        prepared_language: LanguageQueryPreparation | None = None,
+    ) -> TutorResponse:
         async with self._unit_of_work_factory() as uow:
             conversation = await uow.tutor_conversations.get_conversation(conversation_id)
         if conversation is None:
@@ -117,7 +125,10 @@ class ScenarioTutorService:
             knowledge_cutoff_at=cutoff,
             structured_context=structured_context,
         )
-        return await self._tutor_service.ask(conversation_id=conversation_id, question=question, top_k=top_k, context=context)
+        return await self._tutor_service.ask(
+            conversation_id=conversation_id, question=question, top_k=top_k, context=context,
+            prepared_language=prepared_language,
+        )
 
     async def _before_decision_structured_context(
         self, conversation: TutorConversation

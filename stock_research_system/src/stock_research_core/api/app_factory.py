@@ -103,6 +103,8 @@ from stock_research_core.infrastructure.identity.jwt_access_token_service import
 from stock_research_core.infrastructure.identity.opaque_refresh_token_service import (
     OpaqueRefreshTokenService,
 )
+from stock_research_core.infrastructure.language.composition import build_language_service, close_language_service
+from stock_research_core.infrastructure.language.config import LanguageServiceSettings
 from stock_research_core.infrastructure.learning_orchestrator.config import LangGraphSettings
 from stock_research_core.infrastructure.learning_orchestrator.context_loader import SqlAlchemyLearningContextLoader
 from stock_research_core.infrastructure.learning_orchestrator.graph_runtime import LangGraphOrchestratorRuntime
@@ -199,6 +201,7 @@ def create_app(
     embedding_settings: EmbeddingSettings | None = None,
     tutor_model_settings: TutorModelSettings | None = None,
     knowledge_sufficiency_settings: KnowledgeSufficiencySettings | None = None,
+    language_service_settings: LanguageServiceSettings | None = None,
     operations_settings: OperationsSettings | None = None,
     proxy_settings: ProxySettings | None = None,
     learning_orchestrator_settings: LangGraphSettings | None = None,
@@ -210,6 +213,7 @@ def create_app(
     embedding_settings = embedding_settings or EmbeddingSettings()
     tutor_model_settings = tutor_model_settings or TutorModelSettings()
     knowledge_sufficiency_settings = knowledge_sufficiency_settings or KnowledgeSufficiencySettings()
+    language_service_settings = language_service_settings or LanguageServiceSettings()
     operations_settings = operations_settings or OperationsSettings()
     learning_orchestrator_settings = learning_orchestrator_settings or LangGraphSettings()
     proxy_settings = proxy_settings or ProxySettings()
@@ -255,6 +259,11 @@ def create_app(
         app.state.tutor_model = _build_tutor_model(tutor_model_settings)
         app.state.knowledge_sufficiency_settings = knowledge_sufficiency_settings
         app.state.knowledge_sufficiency_gate = _build_knowledge_sufficiency_gate(knowledge_sufficiency_settings)
+        app.state.language_service_settings = language_service_settings
+        app.state.language_service = build_language_service(
+            language_service_settings, tutor_model_settings=tutor_model_settings
+        )
+        app.state.language_service_enabled = language_service_settings.hebrew_query_bridge_enabled
 
         # Phase 11: background jobs. `redis.asyncio.from_url()` and
         # `Celery.send_task`/`control.inspect` are lazy - constructing
@@ -274,6 +283,7 @@ def create_app(
         registry = build_operations_registry(
             unit_of_work_factory=app.state.uow_factory, embedding_provider=app.state.embedding_provider,
             chunker=app.state.chunker,
+            language_service=app.state.language_service, language_service_enabled=app.state.language_service_enabled,
         )
         app.state.background_job_service = BackgroundJobService(
             unit_of_work_factory=app.state.uow_factory, job_registry=registry,
@@ -323,6 +333,8 @@ def create_app(
                 tutor_model=app.state.tutor_model, guardrail=RuleBasedTutorGuardrail(),
                 prompt_builder=GroundedTutorPromptBuilder(),
                 sufficiency_gate=app.state.knowledge_sufficiency_gate,
+                language_service=app.state.language_service,
+                language_service_enabled=app.state.language_service_enabled,
             )
             lesson_tutor_service = LessonTutorService(
                 tutor_service=tutor_service, unit_of_work_factory=app.state.uow_factory
@@ -381,6 +393,8 @@ def create_app(
                 clock=utc_now,
                 max_context_characters=learning_orchestrator_settings.langgraph_max_context_characters,
                 max_state_list_items=learning_orchestrator_settings.langgraph_max_state_list_items,
+                language_service=app.state.language_service,
+                language_service_enabled=app.state.language_service_enabled,
             )
             graph_nodes = GraphNodes(node_deps)
             subgraphs = Subgraphs(
@@ -408,6 +422,7 @@ def create_app(
             yield
         finally:
             await _close_tutor_model(app.state.tutor_model)
+            await close_language_service(app.state.language_service)
             if intent_model_client is not None:
                 await intent_model_client.aclose()
             if checkpointer_pool is not None:

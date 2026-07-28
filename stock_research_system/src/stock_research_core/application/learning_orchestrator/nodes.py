@@ -14,16 +14,25 @@ actions) lives in `subgraphs.py`; this module is the shared spine:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable
 from uuid import UUID, uuid4
 
 from langgraph.types import interrupt
 
-from stock_research_core.application.ai_tutor.guardrails import RuleBasedTutorGuardrail
+from stock_research_core.application.ai_tutor.guardrails import RuleBasedTutorGuardrail, more_restrictive_decision
 from stock_research_core.application.ai_tutor.models import TutorContext
 from stock_research_core.application.exceptions import StockResearchError
+from stock_research_core.application.language.enums import DetectedLanguage, LocalizedMessageKey
+from stock_research_core.application.language.ports import LanguageServicePort
+from stock_research_core.application.language.query_preparation import (
+    LanguageQueryPreparation,
+    detect_request_language,
+    prepare_language_query,
+    untranslated_preparation,
+)
+from stock_research_core.application.language.unavailable_language_service import UnavailableLanguageService
 from stock_research_core.application.learning_orchestrator.actions import (
     AllowlistedLearningActionExecutor,
     ForbiddenLearningActionError,
@@ -36,8 +45,13 @@ from stock_research_core.application.learning_orchestrator.state import (
     bounded_text,
 )
 from stock_research_core.application.persistence.ports import UnitOfWorkPort
-from stock_research_core.domain.ai_tutor.enums import TutorContextType, TutorGuardrailAction, TutorMessageRole
-from stock_research_core.domain.ai_tutor.models import TutorMessage
+from stock_research_core.domain.ai_tutor.enums import (
+    TutorContextType,
+    TutorGuardrailAction,
+    TutorMessageRole,
+    TutorRequestCategory,
+)
+from stock_research_core.domain.ai_tutor.models import TutorGuardrailDecision, TutorMessage
 from stock_research_core.domain.learning_orchestrator.enums import (
     APPROVAL_REQUIRED_ACTION_TYPES,
     LearningActionProposalStatus,
@@ -91,10 +105,44 @@ class NodeDependencies:
     clock: Callable[[], datetime]
     max_context_characters: int = 20_000
     max_state_list_items: int = 50
+    # Phase G2E2A: the same shared `LanguageServicePort` instance
+    # `GroundedAITutorService` and `LiveResearchRunExecutionJobHandler`
+    # are composed with (never a second/third translator implementation).
+    # `language_service_enabled=False` (the default) is the kill switch -
+    # `evaluate_input_guardrail`/`build_refusal_response`/
+    # `build_fallback_response` only ever call `detect_language()` when
+    # this is `True`, so a disabled deployment's routing/refusal/fallback
+    # text is byte-identical to before this phase.
+    language_service: LanguageServicePort = field(default_factory=UnavailableLanguageService)
+    language_service_enabled: bool = False
 
 
 def stage_label(node_name: str) -> str:
     return _ROUTE_LABELS.get(node_name, node_name.replace("_", " ").title())
+
+
+def prepared_language_from_state(state: LearningCoachGraphState) -> LanguageQueryPreparation | None:
+    """Rebuild this run's single `LanguageQueryPreparation` from state.
+
+    Phase G2E2A req. 3: every route in `subgraphs` that reaches a tutor
+    service passes this to `ask(prepared_language=...)`, so the bounded
+    English query `evaluate_input_guardrail` already produced is reused
+    rather than re-translated - one translation call per run, never one per
+    route. Returns `None` when no preparation was recorded (a
+    directly-invoked subgraph in a unit test, or a run from before this
+    phase's checkpoint schema), in which case the tutor service performs
+    its own preparation exactly as it does for a direct `/tutor` request.
+    """
+    prepared = state.get("language_preparation")
+    if not prepared:
+        return None
+    return LanguageQueryPreparation(
+        original_text=state["user_input"],
+        detected_language=DetectedLanguage(prepared["detected_language"]),
+        search_query=prepared.get("intent_query") or state["user_input"],
+        translation_attempted=bool(prepared.get("translation_attempted")),
+        translation_failed=bool(prepared.get("translation_failed")),
+    )
 
 
 class GraphNodes:
@@ -180,26 +228,140 @@ class GraphNodes:
         await self._append_event(state, event_type=LearningOrchestratorEventType.CONTEXT_LOADING, message="Context loaded.")
         return result
 
+    def _detect_language(self, user_input: str) -> DetectedLanguage:
+        """Phase G2E2A: the single kill switch - `language_service_enabled=False`
+        (the default) means this always returns `EN`, so routing/refusal/
+        fallback text is byte-identical to before this phase."""
+        if not self._deps.language_service_enabled:
+            return DetectedLanguage.EN
+        return self._deps.language_service.detect_language(user_input)
+
+    @staticmethod
+    def _intent_query(state: LearningCoachGraphState) -> str:
+        """This run's bounded English query for English-only machinery -
+        `state["user_input"]` verbatim whenever no translation happened."""
+        prepared = state.get("language_preparation") or {}
+        return prepared.get("intent_query") or state["user_input"]
+
+    def _language_from_state(self, state: LearningCoachGraphState) -> DetectedLanguage:
+        """The language this run already determined, without repeating any
+        work. Falls back to a fresh (pure, free) detection only when the
+        node is reached without `evaluate_input_guardrail` having run -
+        which never happens in the compiled graph, but keeps each node
+        independently callable, as this suite's existing node tests do."""
+        prepared = state.get("language_preparation")
+        if prepared and prepared.get("detected_language"):
+            return DetectedLanguage(prepared["detected_language"])
+        return self._detect_language(state.get("user_input", ""))
+
     async def evaluate_input_guardrail(self, state: LearningCoachGraphState) -> dict[str, Any]:
+        """The ONE bounded language-query preparation per Coach request
+        (Phase G2E2A req. 3), plus the deterministic guardrail decision.
+
+        `state["user_input"]` is preserved exactly - never overwritten,
+        never replaced by a translation. Language is detected from
+        `user_input` alone. For Hebrew, exactly one bounded English
+        intent/retrieval query is produced here and then reused for
+        everything English-only downstream: the translated guardrail
+        defense-in-depth pass below, `classify_intent`, and (via
+        `subgraphs`) each tutor service's retrieval - so no route causes a
+        second translation call for the same run.
+
+        Translation failure fails closed: the run is routed to
+        `build_fallback_response` with the exact localized bounded fallback,
+        never allowed to continue into intent classification, unrelated
+        English retrieval, or model generation with untranslated Hebrew.
+        """
         step_count = self._next_step(state)
         context = self._build_tutor_context(state)
-        message = TutorMessage(
-            conversation_id=uuid4(), role=TutorMessageRole.USER,
-            content=bounded_text(state["user_input"], max_characters=self._deps.max_context_characters),
+        user_input = bounded_text(state["user_input"], max_characters=self._deps.max_context_characters)
+        message = TutorMessage(conversation_id=uuid4(), role=TutorMessageRole.USER, content=user_input)
+
+        # Detection is pure and free, so the guardrail runs on the
+        # learner's own words FIRST: a request refused there is never
+        # translated at all - there is nothing to retrieve for it, and an
+        # unsafe question should not be handed to a third-party
+        # translation provider just to build a query no one will use.
+        detected_language = detect_request_language(
+            self._deps.language_service, enabled=self._deps.language_service_enabled, text=user_input,
         )
-        decision = self._deps.guardrail.evaluate_input(conversation_id=message.conversation_id, message=message, context=context)
-        guardrail_result = {
-            "action": decision.action.value, "request_category": decision.request_category.value,
-            "matched_rule_codes": decision.matched_rule_codes, "safe_response_override": decision.safe_response_override,
+        decision = self._deps.guardrail.evaluate_input(
+            conversation_id=message.conversation_id, message=message, context=context,
+            language=detected_language,
+            apply_topic_vocabulary_check=detected_language != DetectedLanguage.HE,
+        )
+        if decision.action == TutorGuardrailAction.REFUSE:
+            return {
+                "step_count": step_count,
+                "language_preparation": self._language_preparation_state(
+                    untranslated_preparation(user_input, detected_language)
+                ),
+                "guardrail_result": self._guardrail_result_state(decision),
+            }
+
+        preparation = await prepare_language_query(
+            self._deps.language_service, enabled=self._deps.language_service_enabled,
+            text=user_input, detected_language=detected_language,
+        )
+        language_preparation = self._language_preparation_state(preparation)
+
+        if preparation.translation_failed:
+            return {
+                "step_count": step_count,
+                "language_preparation": language_preparation,
+                "guardrail_result": {
+                    "action": TutorGuardrailAction.FALLBACK.value,
+                    "request_category": TutorRequestCategory.UNSUPPORTED_TOPIC.value,
+                    "matched_rule_codes": ["LANGUAGE_TRANSLATION_UNAVAILABLE"],
+                    "safe_response_override": self._deps.language_service.localize(
+                        LocalizedMessageKey.INSUFFICIENT_EVIDENCE, language=preparation.detected_language
+                    ),
+                },
+            }
+
+        if preparation.translation_succeeded:
+            # Defense in depth over the bounded English query - the same
+            # deterministic guardrail, and the more restrictive decision
+            # always wins. An original-text REFUSE is never downgraded.
+            translated_decision = self._deps.guardrail.evaluate_input(
+                conversation_id=message.conversation_id,
+                message=message.model_copy(update={"content": preparation.search_query}),
+                context=context, language=preparation.detected_language,
+                apply_topic_vocabulary_check=False,
+            )
+            decision = more_restrictive_decision(decision, translated_decision)
+
+        return {
+            "step_count": step_count, "guardrail_result": self._guardrail_result_state(decision),
+            "language_preparation": language_preparation,
         }
-        return {"step_count": step_count, "guardrail_result": guardrail_result}
+
+    @staticmethod
+    def _guardrail_result_state(decision: TutorGuardrailDecision) -> dict[str, Any]:
+        return {
+            "action": decision.action.value, "request_category": decision.request_category.value,
+            "matched_rule_codes": decision.matched_rule_codes,
+            "safe_response_override": decision.safe_response_override,
+        }
+
+    @staticmethod
+    def _language_preparation_state(preparation: LanguageQueryPreparation) -> dict[str, Any]:
+        """JSON-serializable only - this goes into the LangGraph
+        checkpoint. `intent_query` is the bounded English query, never
+        shown to the learner and never persisted as their message."""
+        return {
+            "detected_language": preparation.detected_language.value,
+            "intent_query": preparation.search_query,
+            "translation_attempted": preparation.translation_attempted,
+            "translation_failed": preparation.translation_failed,
+        }
 
     async def build_refusal_response(self, state: LearningCoachGraphState) -> dict[str, Any]:
         step_count = self._next_step(state)
         guardrail_result = state.get("guardrail_result", {})
-        message = guardrail_result.get("safe_response_override") or (
-            "I can explain the concepts, risks, and educational examples, but I can’t tell you what to buy, "
-            "sell, or personally invest in."
+        detected_language = self._language_from_state(state)
+        message = guardrail_result.get("safe_response_override") or self._deps.language_service.localize(
+            LocalizedMessageKey.ADVICE_REFUSAL, language=detected_language
         )
         await self._append_event(
             state, event_type=LearningOrchestratorEventType.RUN_COMPLETED, message="Request refused (guardrail).",
@@ -211,11 +373,19 @@ class GraphNodes:
 
     async def build_fallback_response(self, state: LearningCoachGraphState) -> dict[str, Any]:
         step_count = self._next_step(state)
-        message = (
-            "I don’t have enough approved FinQuest material to answer that reliably. Try asking about a "
-            "specific financial-education concept, your progress, a lesson, an exercise, a scenario, or your "
-            "portfolio."
+        detected_language = self._language_from_state(state)
+        base_message = self._deps.language_service.localize(
+            LocalizedMessageKey.INSUFFICIENT_EVIDENCE, language=detected_language
         )
+        suggestion = (
+            " נסה/י לשאול על מושג פיננסי-חינוכי ספציפי, ההתקדמות שלך, שיעור, תרגיל, תרחיש, או תיק ההשקעות שלך."
+            if detected_language == DetectedLanguage.HE
+            else (
+                " Try asking about a specific financial-education concept, your progress, a lesson, an "
+                "exercise, a scenario, or your portfolio."
+            )
+        )
+        message = base_message + suggestion
         await self._append_event(
             state, event_type=LearningOrchestratorEventType.RUN_COMPLETED, message="Request could not be classified.",
         )
@@ -225,10 +395,18 @@ class GraphNodes:
         }
 
     async def classify_intent(self, state: LearningCoachGraphState) -> dict[str, Any]:
+        """Phase G2E2A req. 3: the intent classifier's rule vocabulary (and
+        the optional model-assisted fallback's prompt) are English-only, so
+        it is given this run's already-prepared bounded English query, not
+        the raw Hebrew text - reusing the single translation
+        `evaluate_input_guardrail` performed, never issuing a second one.
+        For an English request (or a disabled feature flag) the prepared
+        query IS `state["user_input"]` verbatim, so English routing is
+        byte-identical to before this phase."""
         step_count = self._next_step(state)
         references = {key: UUID(value) for key, value in state.get("context_references", {}).items()}
         classification = await self._deps.intent_classifier.classify(
-            learner_id=UUID(state["learner_id"]), user_input=state["user_input"],
+            learner_id=UUID(state["learner_id"]), user_input=self._intent_query(state),
             context_type=TutorContextType(state.get("requested_context_type") or TutorContextType.GENERAL_EDUCATION.value),
             context_references=references,
         )

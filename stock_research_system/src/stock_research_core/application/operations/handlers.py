@@ -23,6 +23,7 @@ from stock_research_core.application.ai_tutor.models import TutorContext
 from stock_research_core.application.ai_tutor.ports import KnowledgeRetrieverPort, TutorGuardrailPort
 from stock_research_core.application.exceptions import (
     DuplicateEvidenceError,
+    LanguageServiceError,
     LiveResearchJobProviderNotConfiguredError,
     LiveResearchProviderAccessError,
     LiveResearchProviderConfigurationError,
@@ -34,6 +35,9 @@ from stock_research_core.application.exceptions import (
     StockResearchError,
     TransientInfrastructureError,
 )
+from stock_research_core.application.language.enums import DetectedLanguage
+from stock_research_core.application.language.ports import LanguageServicePort
+from stock_research_core.application.language.unavailable_language_service import UnavailableLanguageService
 from stock_research_core.application.live_research.provider_evidence_mapping import (
     discovery_candidate_to_evidence_kwargs,
     sec_company_facts_candidate_to_evidence_kwargs,
@@ -909,6 +913,8 @@ class LiveResearchRunExecutionJobHandler:
         jobs_enabled: bool,
         discovery_max_results: int = 10,
         clock: Clock = utc_now,
+        language_service: LanguageServicePort | None = None,
+        language_service_enabled: bool = False,
     ) -> None:
         self._research_request_service = research_request_service
         self._discovery_search_provider = discovery_search_provider
@@ -919,6 +925,15 @@ class LiveResearchRunExecutionJobHandler:
         # model's own silent default (G2B Correction V2, item 5).
         self._discovery_max_results = discovery_max_results
         self._clock = clock
+        # Phase G2E2A: the same shared `LanguageServicePort` instance
+        # `GroundedAITutorService` and the LangGraph coach's
+        # `NodeDependencies` are composed with. `language_service_enabled=False`
+        # (the default) means `_build_discovery_request` never calls
+        # `detect_language()`, so the discovery query sent to the search
+        # provider is byte-identical to `parameters.original_question`,
+        # exactly as before this phase.
+        self._language_service: LanguageServicePort = language_service or UnavailableLanguageService()
+        self._language_service_enabled = language_service_enabled
 
     async def handle(
         self, *, context: JobExecutionContext, parameters: LiveResearchRunExecutionParameters, progress: ProgressReporterPort
@@ -1036,10 +1051,28 @@ class LiveResearchRunExecutionJobHandler:
                 f"Required provider(s) not configured for scope {scope.value}: {', '.join(missing)}."
             )
 
-    def _build_discovery_request(self, parameters: LiveResearchRunExecutionParameters) -> DiscoverySearchRequest:
-        return DiscoverySearchRequest(
-            query=parameters.original_question, max_results=self._discovery_max_results,
-        )
+    async def _build_discovery_request(self, parameters: LiveResearchRunExecutionParameters) -> DiscoverySearchRequest:
+        """Phase G2E2A: `parameters.original_question` (and, upstream,
+        `ResearchRequest.original_question`/`normalized_query`) are never
+        touched here or anywhere else - only the `query` sent to the
+        discovery search provider is ever replaced by a bounded English
+        translation, and only when Hebrew translation is enabled,
+        detected, and succeeds. Any failure (disabled, non-Hebrew,
+        translation error) falls back to the exact original behavior:
+        `query=parameters.original_question`.
+        """
+        query = parameters.original_question
+        if self._language_service_enabled:
+            detected_language = self._language_service.detect_language(query)
+            if detected_language == DetectedLanguage.HE:
+                try:
+                    translation = await self._language_service.translate_to_english_query(
+                        query, source_language=detected_language
+                    )
+                    query = translation.translated_query
+                except LanguageServiceError:
+                    query = parameters.original_question
+        return DiscoverySearchRequest(query=query, max_results=self._discovery_max_results)
 
     async def _call_required_providers(
         self, parameters: LiveResearchRunExecutionParameters
@@ -1058,11 +1091,11 @@ class LiveResearchRunExecutionJobHandler:
                 SecCompanyFactsRequest(cik=parameters.sec_cik, concepts=parameters.sec_concepts)
             )
             results.append((facts_result, sec_company_facts_candidate_to_evidence_kwargs))
-            search_result = await self._discovery_search_provider.search(self._build_discovery_request(parameters))
+            search_result = await self._discovery_search_provider.search(await self._build_discovery_request(parameters))
             results.append((search_result, discovery_candidate_to_evidence_kwargs))
         else:
             assert self._discovery_search_provider is not None
-            search_result = await self._discovery_search_provider.search(self._build_discovery_request(parameters))
+            search_result = await self._discovery_search_provider.search(await self._build_discovery_request(parameters))
             results.append((search_result, discovery_candidate_to_evidence_kwargs))
         assert len(results) <= _LIVE_RESEARCH_MAX_PROVIDER_CALLS
         return results

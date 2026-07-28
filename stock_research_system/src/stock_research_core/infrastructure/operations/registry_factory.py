@@ -23,6 +23,8 @@ from stock_research_core.application.ai_tutor.prompt_builder import PROMPT_VERSI
 from stock_research_core.application.ai_tutor.retrieval import HYBRID_RETRIEVAL_VERSION, HybridKnowledgeRetriever
 from stock_research_core.application.ai_tutor.service import TUTOR_POLICY_VERSION, GroundedAITutorService
 from stock_research_core.application.ai_tutor.sufficiency import DisabledKnowledgeSufficiencyGate
+from stock_research_core.application.language.ports import LanguageServicePort
+from stock_research_core.application.language.unavailable_language_service import UnavailableLanguageService
 from stock_research_core.application.live_research.provider_ports import (
     DiscoverySearchProviderPort,
     OfficialCompanyDataProviderPort,
@@ -175,7 +177,14 @@ def build_operations_registry(
     unit_of_work_factory: Callable[[], UnitOfWorkPort],
     embedding_provider: EmbeddingPort,
     chunker: KnowledgeChunkerPort,
+    language_service: LanguageServicePort | None = None,
+    language_service_enabled: bool = False,
 ) -> BackgroundJobRegistry:
+    # Phase G2E2A: defaults to the safe, pure, translation-incapable
+    # adapter - callers that don't yet pass a real language service (or
+    # pass `language_service_enabled=False`, the default) get exactly
+    # today's behavior from `LiveResearchRunExecutionJobHandler`.
+    language_service = language_service or UnavailableLanguageService()
     knowledge_ingestion_service = KnowledgeIngestionService(
         unit_of_work_factory=unit_of_work_factory, chunker=chunker, embedding_provider=embedding_provider
     )
@@ -257,6 +266,8 @@ def build_operations_registry(
             official_company_data_provider=official_company_data_provider,
             jobs_enabled=operations_settings.live_research_jobs_enabled,
             discovery_max_results=discovery_max_results,
+            language_service=language_service,
+            language_service_enabled=language_service_enabled,
         ),
     }
     return build_default_registry(handlers)

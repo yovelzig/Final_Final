@@ -51,6 +51,7 @@ from stock_research_core.application.ai_tutor.prompt_builder import GroundedTuto
 from stock_research_core.application.ai_tutor.retrieval import HybridKnowledgeRetriever
 from stock_research_core.application.ai_tutor.scenario_tutor import ScenarioTutorService
 from stock_research_core.application.ai_tutor.service import GroundedAITutorService
+from stock_research_core.application.language.ports import LanguageServicePort
 from stock_research_core.application.exceptions import (
     InsufficientPermissionError,
     RateLimitExceededError,
@@ -150,6 +151,14 @@ def get_tutor_model(request: Request) -> TutorModelPort:
 
 def get_knowledge_sufficiency_gate(request: Request) -> KnowledgeSufficiencyGatePort:
     return request.app.state.knowledge_sufficiency_gate
+
+
+def get_language_service(request: Request) -> LanguageServicePort:
+    return request.app.state.language_service
+
+
+def get_language_service_enabled(request: Request) -> bool:
+    return request.app.state.language_service_enabled
 
 
 def get_correlation_id(request: Request) -> str:
@@ -305,11 +314,14 @@ def get_ai_tutor_service(
     retriever: Annotated[HybridKnowledgeRetriever, Depends(get_knowledge_retriever)],
     tutor_model: Annotated[TutorModelPort, Depends(get_tutor_model)],
     sufficiency_gate: Annotated[KnowledgeSufficiencyGatePort, Depends(get_knowledge_sufficiency_gate)],
+    language_service: Annotated[LanguageServicePort, Depends(get_language_service)],
+    language_service_enabled: Annotated[bool, Depends(get_language_service_enabled)],
 ) -> GroundedAITutorService:
     return GroundedAITutorService(
         unit_of_work_factory=uow_factory, retriever=retriever, tutor_model=tutor_model,
         guardrail=RuleBasedTutorGuardrail(), prompt_builder=GroundedTutorPromptBuilder(),
         sufficiency_gate=sufficiency_gate,
+        language_service=language_service, language_service_enabled=language_service_enabled,
     )
 
 

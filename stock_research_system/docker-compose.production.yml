@@ -125,6 +125,20 @@ services:
       TUTOR_KNOWLEDGE_SUFFICIENCY_MIN_LEXICAL_SCORE: ${TUTOR_KNOWLEDGE_SUFFICIENCY_MIN_LEXICAL_SCORE:-0.05}
       TUTOR_KNOWLEDGE_SUFFICIENCY_MIN_CONTEXT_METADATA_SCORE: ${TUTOR_KNOWLEDGE_SUFFICIENCY_MIN_CONTEXT_METADATA_SCORE:-0.90}
 
+      # Phase G2E2A: Hebrew query bridge - ONE shared switch for the Tutor,
+      # the LangGraph learning coach, and Live Research (no Tutor-only
+      # flag exists). Disabled in production: deploying this code alone
+      # must not change any existing English behavior. The three
+      # LANGUAGE_SERVICE_* credential variables are optional overrides
+      # only - left blank, translation reuses the TUTOR_MODEL_* provider
+      # already configured above rather than a second copy of the key.
+      HEBREW_QUERY_BRIDGE_ENABLED: ${HEBREW_QUERY_BRIDGE_ENABLED:-false}
+      LANGUAGE_SERVICE_PROVIDER: ${LANGUAGE_SERVICE_PROVIDER:-unavailable}
+      LANGUAGE_SERVICE_BASE_URL: "${LANGUAGE_SERVICE_BASE_URL:-}"
+      LANGUAGE_SERVICE_API_KEY: "${LANGUAGE_SERVICE_API_KEY:-}"
+      LANGUAGE_SERVICE_MODEL_NAME: "${LANGUAGE_SERVICE_MODEL_NAME:-}"
+      LANGUAGE_SERVICE_TIMEOUT_SECONDS: ${LANGUAGE_SERVICE_TIMEOUT_SECONDS:-15}
+
       # Runtime
       FINQUEST_ENV: ${FINQUEST_ENV:-production}
       ALLOW_FAKE_EMBEDDINGS_IN_PRODUCTION: ${ALLOW_FAKE_EMBEDDINGS_IN_PRODUCTION:-false}
@@ -468,6 +482,21 @@ services:
       LIVE_RESEARCH_SEC_BASE_URL: ${LIVE_RESEARCH_SEC_BASE_URL:-https://data.sec.gov}
       LIVE_RESEARCH_SEC_TIMEOUT_SECONDS: ${LIVE_RESEARCH_SEC_TIMEOUT_SECONDS:-30.0}
       LIVE_RESEARCH_SEC_REQUESTS_PER_SECOND: ${LIVE_RESEARCH_SEC_REQUESTS_PER_SECOND:-5.0}
+      # Phase G2E2A: LIVE_RESEARCH_RUN_EXECUTION executes in THIS worker
+      # process, whose own composition root loads these itself - the same
+      # single shared flag as finquest-api, disabled by default.
+      HEBREW_QUERY_BRIDGE_ENABLED: ${HEBREW_QUERY_BRIDGE_ENABLED:-false}
+      LANGUAGE_SERVICE_PROVIDER: ${LANGUAGE_SERVICE_PROVIDER:-unavailable}
+      LANGUAGE_SERVICE_BASE_URL: "${LANGUAGE_SERVICE_BASE_URL:-}"
+      LANGUAGE_SERVICE_API_KEY: "${LANGUAGE_SERVICE_API_KEY:-}"
+      LANGUAGE_SERVICE_MODEL_NAME: "${LANGUAGE_SERVICE_MODEL_NAME:-}"
+      LANGUAGE_SERVICE_TIMEOUT_SECONDS: ${LANGUAGE_SERVICE_TIMEOUT_SECONDS:-15}
+      # Reused for translation credentials when the overrides above are
+      # blank (infrastructure.language.composition) - never a duplicate key.
+      TUTOR_MODEL_PROVIDER: ${TUTOR_MODEL_PROVIDER:-extractive}
+      TUTOR_MODEL_BASE_URL: "${TUTOR_MODEL_BASE_URL:-}"
+      TUTOR_MODEL_API_KEY: "${TUTOR_MODEL_API_KEY:-}"
+      TUTOR_MODEL_NAME: "${TUTOR_MODEL_NAME:-}"
     command: >
       celery -A stock_research_core.infrastructure.operations.celery_tasks worker
       --loglevel=info -Q finquest.research --concurrency=1 -n worker-research@%h

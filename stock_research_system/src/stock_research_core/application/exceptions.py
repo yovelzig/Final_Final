@@ -546,6 +546,34 @@ class LiveResearchEvidenceNotAvailableError(StockResearchError):
     a malformed result_summary, or a ResearchRun that is not COMPLETED)."""
 
 
+class LanguageServiceError(StockResearchError):
+    """The shared `LanguageServicePort` could not translate a non-English
+    question into a bounded English retrieval/search query (Phase G2E2A).
+
+    Never raised by `detect_language()` or `localize()` - both are pure,
+    local, and cannot fail. Only `translate_to_english_query()` raises
+    this, covering a missing/misconfigured translation provider, a
+    transient network failure after bounded retries, or a response that
+    fails structured-output validation. Callers must degrade gracefully
+    (e.g. `GroundedAITutorService` falls back to the original-language
+    text as the retrieval query, which naturally yields an
+    insufficient-evidence fallback against an English-only knowledge
+    base) - never crash, never fabricate a translation."""
+
+
+class LanguageServiceConfigurationError(StockResearchError):
+    """`HEBREW_QUERY_BRIDGE_ENABLED=true` with `language_service_provider=
+    'llm_backed'`, but no usable base URL/API key/model name could be
+    resolved - neither from `LanguageServiceSettings`'s own optional
+    overrides nor by reusing the configured `TutorModelSettings` (e.g.
+    the Tutor itself is configured as `extractive`, which has no
+    endpoint to reuse). Raised once, at composition time
+    (`infrastructure.language.composition.build_language_service`),
+    before any network call would be attempted - never a silent
+    fallback to `UnavailableLanguageService` when the operator explicitly
+    asked for translation to be enabled."""
+
+
 class LiveResearchRequesterContextError(StockResearchError):
     """A `LIVE_RESEARCH_RUN_EXECUTION` job was requested or executed
     without exactly one trusted requester identity.

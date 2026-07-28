@@ -326,6 +326,55 @@ Still not committed, pushed, merged, deployed, or activated - all four activatio
 
 ---
 
+### Phase G2E2/G2E2A — Hebrew Question Bridge for the Grounded Tutor, Coach, and Live Research — Detail
+
+- **Goal:** Let a learner ask in Hebrew and receive a grounded Hebrew answer over the existing **English** approved knowledge corpus, without translating or re-ingesting the corpus, without a database migration, and without changing any existing English behavior. One shared language service is reused by three consumers (`GroundedAITutorService`, the LangGraph learning coach, `LiveResearchRunExecutionJobHandler`).
+- **Baseline:** `5361952b54c8ada6cf5c62ecdc78abb163a6558f` (merge of PR #17, `migration/phase-g2e-frontend-i18n`).
+- **Design (one shared surface, no duplication):**
+  - `application/language/` - `DetectedLanguage`/`LocalizedMessageKey` enums, the deterministic Unicode-range `detect_language()` (pure, network-free, no model call), the `LanguageServicePort` protocol, the strict `TranslationQueryPayload`/`TranslationResult` models, the fixed localized-message table, `UnavailableLanguageService`, and `prepare_language_query()`.
+  - `infrastructure/language/` - `LanguageServiceSettings`, `build_language_service()`/`close_language_service()`, and the `LlmBackedLanguageService` provider adapter.
+  - **One bounded preparation per request.** `prepare_language_query()` detects the language from the request text alone and, for Hebrew, performs exactly ONE translation call producing a bounded English *query* (never an answer, never evidence, never the learner's persisted message, never a citation). Every English-only component downstream reuses that single result: the translated-input guardrail pass, the intent classifier, retrieval, and the Knowledge Sufficiency Gate.
+  - **Fails closed.** A failed translation returns the exact localized bounded fallback - no model call, no retrieval acceptance, and no reliance on an untranslated Hebrew embedding query happening to match nothing.
+  - **No DB transaction is held during an external call.** `GroundedAITutorService.ask()` uses four short Unit-of-Work scopes (load/revalidate conversation and persist the learner message; persist the guardrail decision; persist retrieval state and run the sufficiency gate; persist the answer, citations, and assistant message). Translation and every model call - including the bounded citation retry and the single answer-language repair attempt - happen strictly between those scopes.
+  - **Answer-language enforcement.** A Hebrew instruction in the prompt is a request, not a guarantee: a Hebrew request whose answer comes back in English gets at most ONE bounded repair attempt over the *same* approved candidates (no new sources), then the exact localized fallback. Citation validation is re-run after the repair, so a repaired answer cannot bypass it.
+- **Environment variables added (operator-facing, all disabled/blank by default):**
+
+  | Variable | Default | Purpose |
+  | --- | --- | --- |
+  | `HEBREW_QUERY_BRIDGE_ENABLED` | `false` | **The single, shared switch** for the Tutor, the Coach, AND Live Research. There is deliberately no Tutor-only flag; Phase G2D2 must reuse this one. |
+  | `LANGUAGE_SERVICE_PROVIDER` | `unavailable` | `unavailable` needs no key and no network (detection/localization still work; translation always fails closed). `llm_backed` calls a chat-completions-shaped endpoint with a short "translate, do not answer" prompt. |
+  | `LANGUAGE_SERVICE_BASE_URL` | blank | **Optional override.** Left blank, translation reuses the already-configured `TUTOR_MODEL_*` provider (`openai_compatible`/`ollama_cloud`) - production never needs a second copy of the same Ollama Cloud key. |
+  | `LANGUAGE_SERVICE_API_KEY` | blank | Optional override; never committed. Only ever set on a real server `.env`. |
+  | `LANGUAGE_SERVICE_MODEL_NAME` | blank | Optional override. |
+  | `LANGUAGE_SERVICE_TIMEOUT_SECONDS` | `15` | Bounded per-request timeout for the translation provider. |
+
+  Enumerated in `.env.production.example`, and in both Compose files on exactly the two services that need them: `finquest-api` (Tutor + Coach) and `finquest-worker-research` (`LIVE_RESEARCH_RUN_EXECUTION` runs in that worker process, whose own composition root loads these settings itself). The four generic `TUTOR_MODEL_PROVIDER`/`_BASE_URL`/`_API_KEY`/`_NAME` variables were added to `finquest-worker-research` for the same reason - so the worker can reuse the Tutor's configured credentials rather than duplicating the key. Enforced by `tests/unit/test_docker_image_contract.py::TestComposeLanguageServiceEnvironmentVariables`, which also asserts the earlier Tutor-scoped flag name (`TUTOR_LANGUAGE_SERVICE_ENABLED`) exists nowhere.
+- **Activation gates:** `HEBREW_QUERY_BRIDGE_ENABLED=true` **and** `LANGUAGE_SERVICE_PROVIDER=llm_backed` **and** resolvable credentials (explicit overrides or a reusable `TUTOR_MODEL_PROVIDER`). Enabling the flag alone with the default `unavailable` provider yields detection and localized fallbacks but never a translation. An operator who enables the bridge with `llm_backed` and no resolvable credential anywhere gets a fail-fast `LanguageServiceConfigurationError` at startup - never a silent downgrade to `UnavailableLanguageService`. **No gate was flipped by this phase.**
+- **Expected migrations:** None. The bridge stores no new column, table, or row: the learner's original Hebrew text is persisted in the existing `TutorMessage.content`, and the bounded English query is deliberately never persisted at all. (Phase G2D2 *is* expected to add a valid additive migration; nothing in this phase blocks that.)
+- **Expected affected services (on a future deploy, not yet performed):** `finquest-api` and `finquest-worker-research` - configuration only while the flag stays `false`.
+- **Files Phase G2D2 must reuse (never re-implement or duplicate):**
+
+  | File | What G2D2 reuses it for |
+  | --- | --- |
+  | `application/language/enums.py` | `DetectedLanguage`, `LocalizedMessageKey` - the only language enum and message-key set. |
+  | `application/language/detection.py` | The only language detector (`detect_language`). |
+  | `application/language/ports.py` | The only translator port (`LanguageServicePort`). |
+  | `application/language/models.py` | `TranslationQueryPayload`/`TranslationResult` and the shared length bounds. |
+  | `application/language/localization.py` | The only localized-message table (`localize`). |
+  | `application/language/unavailable_language_service.py` | The safe disabled/no-credential adapter. |
+  | `application/language/query_preparation.py` | `prepare_language_query()`/`LanguageQueryPreparation` - the one bounded preparation step, and the `translation_failed` fail-closed contract a research-resume path must honor. |
+  | `infrastructure/language/config.py` | `LanguageServiceSettings` and the single `HEBREW_QUERY_BRIDGE_ENABLED` flag. |
+  | `infrastructure/language/composition.py` | `build_language_service()`/`close_language_service()` - the only place the enabled/provider decision and the Tutor-credential reuse live. |
+  | `infrastructure/language/llm_backed_language_service.py` | The only translation provider adapter. |
+  | `application/ai_tutor/guardrails.py` | The Hebrew safety patterns and `more_restrictive_decision()` (defense-in-depth merge). |
+  | `application/learning_orchestrator/nodes.py` | `prepared_language_from_state()` - how a Coach node/subgraph passes this run's existing preparation to a tutor service instead of translating again. |
+
+  A G2D2 research-resume path that needs the language service in the worker should read it from `WorkerContext.language_service` (already composed) rather than building a second one.
+- **Deliberately NOT implemented here (G2D2 scope):** `WAITING_FOR_RESEARCH`, Coach research-resume jobs, new research graph nodes, OpenAI reasoning routing, and any new migration.
+- **Correction pass (G2E2A) applied on top of the initial G2E2 implementation, same branch, still uncommitted:** worker composition root now loads/builds/passes/closes the language service (the initial patch composed it only in `api/app_factory.py`, so the real `finquest-worker-research` handler silently got `UnavailableLanguageService`); the Tutor-only flag was replaced by the single shared `HEBREW_QUERY_BRIDGE_ENABLED`; the Coach now routes Hebrew through a bounded English intent query instead of handing Hebrew to the English-only classifier; deterministic pure-Hebrew safety patterns were added (no reliance on embedded English "buy"/"sell"); translation/model calls were moved outside every Unit of Work; strict structural validation of the translation response was added; answer-language enforcement with one bounded repair was added; and the future-migration freeze test was deleted (a phase diff/report assertion, not a permanent runtime test).
+
+---
+
 ## Owner Migration Decisions (Authoritative)
 
 Recorded directly from the product owner during Stage 0. These are **authoritative** and supersede any conflicting Stage 0 conclusion drawn purely from technical/dependency analysis — see `architecture-migration-plan.md`'s fuller "Owner Migration Decisions" section for the complete rationale. Summary:

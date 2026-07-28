@@ -21,14 +21,15 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from celery.signals import worker_process_init
+from celery.signals import worker_process_init, worker_process_shutdown
 
 from stock_research_core.application.ai_tutor.chunking import HeadingAwareWordChunker
 from stock_research_core.application.exceptions import StockResearchError
+from stock_research_core.application.language.ports import LanguageServicePort
 from stock_research_core.application.operations.job_registry import BackgroundJobRegistry
 from stock_research_core.application.operations.service import BackgroundJobService
 from stock_research_core.domain.operations.enums import BackgroundJobType
-from stock_research_core.infrastructure.ai_tutor.config import EmbeddingSettings
+from stock_research_core.infrastructure.ai_tutor.config import EmbeddingSettings, TutorModelSettings
 from stock_research_core.infrastructure.ai_tutor.deterministic_fake_embeddings import (
     DeterministicFakeEmbeddingAdapter,
 )
@@ -41,6 +42,8 @@ from stock_research_core.infrastructure.ai_tutor.sentence_transformer_embeddings
 from stock_research_core.infrastructure.database.config import DatabaseSettings
 from stock_research_core.infrastructure.database.engine import create_database_engine, create_session_factory
 from stock_research_core.infrastructure.database.unit_of_work import SqlAlchemyUnitOfWork
+from stock_research_core.infrastructure.language.composition import build_language_service, close_language_service
+from stock_research_core.infrastructure.language.config import LanguageServiceSettings
 from stock_research_core.infrastructure.operations.celery_app import celery_app
 from stock_research_core.infrastructure.operations.celery_queue import CeleryJobQueue
 from stock_research_core.infrastructure.operations.config import OperationsSettings
@@ -81,15 +84,47 @@ class WorkerContext:
     redis_client: Any
     service: BackgroundJobService
     registry: BackgroundJobRegistry
+    #: Phase G2E2A: the same shared `LanguageServicePort` instance the API
+    #: process composes (`api.app_factory`) - stored here so
+    #: `_shutdown_worker_process` can close an owned HTTP client, and so
+    #: a future handler that needs direct access (not just through the
+    #: registry) has one. `build_operations_registry` receives this
+    #: exact instance too, never a second one.
+    language_service: LanguageServicePort
 
 
 _worker_context: WorkerContext | None = None
 
 
-def _build_worker_context() -> WorkerContext:
-    database_settings = DatabaseSettings()
-    embedding_settings = EmbeddingSettings()
-    operations_settings = OperationsSettings()
+def _build_worker_context(
+    *,
+    database_settings: DatabaseSettings | None = None,
+    embedding_settings: EmbeddingSettings | None = None,
+    operations_settings: OperationsSettings | None = None,
+    language_service_settings: LanguageServiceSettings | None = None,
+    tutor_model_settings: TutorModelSettings | None = None,
+) -> WorkerContext:
+    """The worker-process composition root. Every settings parameter is
+    optional and defaults to reading the real environment/`.env` file
+    (exactly what `worker_process_init` relies on) - the explicit
+    overrides exist so a unit test can build a fully hermetic
+    `WorkerContext` (`test_worker_language_composition.py`) without any
+    ambient `.env`/environment-variable leakage, mirroring
+    `api.app_factory.create_app`'s own settings-override pattern.
+    """
+    database_settings = database_settings or DatabaseSettings()
+    embedding_settings = embedding_settings or EmbeddingSettings()
+    operations_settings = operations_settings or OperationsSettings()
+    # Phase G2E2A: loaded (env vars only - no network call) so
+    # LIVE_RESEARCH_RUN_EXECUTION, executed here in the worker, gets the
+    # *same configured* language service the API process would build -
+    # not the safe `UnavailableLanguageService` default it silently fell
+    # back to before this correction pass. `tutor_model_settings` is
+    # loaded too, purely so a translation-capable provider can reuse the
+    # Tutor's own already-configured credentials instead of requiring a
+    # second copy (see `infrastructure.language.composition`).
+    language_service_settings = language_service_settings or LanguageServiceSettings()
+    tutor_model_settings = tutor_model_settings or TutorModelSettings()
 
     assert_embedding_provider_production_safe(
         embedding_settings=embedding_settings, operations_settings=operations_settings
@@ -109,8 +144,18 @@ def _build_worker_context() -> WorkerContext:
         )
     )
     chunker = HeadingAwareWordChunker()
+    # Network-free: constructing an `LlmBackedLanguageService` only opens
+    # a lazy `httpx.AsyncClient` (no connection until first request),
+    # identical in spirit to every other adapter built in this function.
+    # Never logs `language_service_settings.language_service_api_key` (or
+    # any resolved/reused credential) - only the resulting object is used.
+    language_service = build_language_service(
+        language_service_settings, tutor_model_settings=tutor_model_settings
+    )
     registry = build_operations_registry(
-        unit_of_work_factory=uow_factory, embedding_provider=embedding_provider, chunker=chunker
+        unit_of_work_factory=uow_factory, embedding_provider=embedding_provider, chunker=chunker,
+        language_service=language_service,
+        language_service_enabled=language_service_settings.hebrew_query_bridge_enabled,
     )
 
     redis_client = build_redis_client(operations_settings.redis_url)
@@ -126,7 +171,10 @@ def _build_worker_context() -> WorkerContext:
         unit_of_work_factory=uow_factory, job_registry=registry, job_queue=job_queue, lock_port=lock_port,
         metrics=metrics, tracing=tracing,
     )
-    return WorkerContext(engine=engine, redis_client=redis_client, service=service, registry=registry)
+    return WorkerContext(
+        engine=engine, redis_client=redis_client, service=service, registry=registry,
+        language_service=language_service,
+    )
 
 
 def get_worker_context() -> WorkerContext:
@@ -139,6 +187,21 @@ def get_worker_context() -> WorkerContext:
 @worker_process_init.connect
 def _init_worker_process(**_kwargs: Any) -> None:
     get_worker_context()
+
+
+@worker_process_shutdown.connect
+def _shutdown_worker_process(**_kwargs: Any) -> None:
+    """Closes an owned `LlmBackedLanguageService` HTTP client on worker
+    shutdown, mirroring the API process's `create_app` lifespan
+    `finally:` block. A safe no-op when no worker context was ever built
+    (e.g. the process is shutting down before `worker_process_init` ever
+    ran), or when the configured language service owns no client
+    (`UnavailableLanguageService`, the default)."""
+    global _worker_context
+    if _worker_context is None:
+        return
+    asyncio.run(close_language_service(_worker_context.language_service))
+    _worker_context = None
 
 
 async def _execute_job(job_id: str, *, task_name: str, celery_task_id: str) -> dict[str, Any]:

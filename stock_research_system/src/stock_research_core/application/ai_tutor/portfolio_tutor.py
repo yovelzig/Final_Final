@@ -24,6 +24,7 @@ from stock_research_core.application.exceptions import (
     TutorConversationNotFoundError,
     VirtualPortfolioNotFoundError,
 )
+from stock_research_core.application.language.query_preparation import LanguageQueryPreparation
 from stock_research_core.application.virtual_portfolio.service import VirtualPortfolioService
 from stock_research_core.application.virtual_portfolio.valuation_service import PortfolioValuationService
 from stock_research_core.domain.ai_tutor.enums import TutorContextType
@@ -69,7 +70,13 @@ class PortfolioTutorService:
         return await self._tutor_service.create_conversation(learner_id=learner_id, context=context)
 
     async def ask(
-        self, *, conversation_id: UUID, question: str, as_of: datetime | None = None, top_k: int = 8
+        self,
+        *,
+        conversation_id: UUID,
+        question: str,
+        as_of: datetime | None = None,
+        top_k: int = 8,
+        prepared_language: LanguageQueryPreparation | None = None,
     ) -> TutorResponse:
         async with self._unit_of_work_factory() as uow:
             conversation = await uow.tutor_conversations.get_conversation(conversation_id)
@@ -86,7 +93,8 @@ class PortfolioTutorService:
             structured_context=structured_context,
         )
         return await self._tutor_service.ask(
-            conversation_id=conversation_id, question=question, top_k=top_k, context=context
+            conversation_id=conversation_id, question=question, top_k=top_k, context=context,
+            prepared_language=prepared_language,
         )
 
     async def _build_structured_context(self, portfolio_id: UUID, *, as_of: datetime | None) -> dict[str, Any]:
