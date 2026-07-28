@@ -161,6 +161,13 @@ class IntegrationClientRepositoryPort(Protocol):
 
     async def get_by_id(self, integration_id: UUID) -> IntegrationClient | None: ...
 
+    async def get_for_update(self, integration_id: UUID) -> IntegrationClient | None:
+        """Load a client row with a `SELECT ... FOR UPDATE`-equivalent
+        lock (Phase G2C), so two concurrent grant/revoke operations on
+        the same client cannot race - the second caller blocks until
+        the first commits, then re-reads the freshly-committed state."""
+        ...
+
     async def update_last_used(self, integration_id: UUID, *, last_used_at: datetime) -> IntegrationClient: ...
 
     async def set_status(
@@ -168,6 +175,18 @@ class IntegrationClientRepositoryPort(Protocol):
     ) -> IntegrationClient: ...
 
     async def list_clients(self) -> list[IntegrationClient]: ...
+
+    async def add_allowed_job_type(self, integration_id: UUID, job_type: BackgroundJobType) -> None:
+        """Idempotently grant one job type. Persistence-only - callers
+        (Phase G2C's `IntegrationClientAdminService`) own the business
+        rule of *when* this is safe to call."""
+        ...
+
+    async def remove_allowed_job_type(self, integration_id: UUID, job_type: BackgroundJobType) -> None:
+        """Idempotently revoke one job type. Persistence-only - callers
+        own the business rule of *when* this is safe to call (e.g. never
+        leaving an ACTIVE client with zero allowed job types)."""
+        ...
 
 
 class IntegrationRequestRepositoryPort(Protocol):

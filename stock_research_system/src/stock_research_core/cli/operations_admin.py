@@ -16,6 +16,21 @@ List / revoke:
     python -m stock_research_core.cli.operations_admin --list-integration-clients
     python -m stock_research_core.cli.operations_admin --revoke-integration-client <UUID>
 
+Grant or revoke a single job-type permission on an existing client,
+without rotating its API key (Phase G2C - see
+`IntegrationClientAdminService`):
+
+    python -m stock_research_core.cli.operations_admin `
+      --grant-integration-job-type <INTEGRATION_UUID> `
+      --job-type LIVE_RESEARCH_RUN_EXECUTION
+
+    python -m stock_research_core.cli.operations_admin `
+      --revoke-integration-job-type <INTEGRATION_UUID> `
+      --job-type LIVE_RESEARCH_RUN_EXECUTION
+
+An ACTIVE client can never be revoked down to zero allowed job types -
+grant a replacement job type first, or disable the client instead.
+
 Create a job from a parameters file (JSON object only - never an
 arbitrary Python expression):
 
@@ -52,7 +67,14 @@ import sys
 from uuid import UUID
 
 from stock_research_core.application.ai_tutor.chunking import HeadingAwareWordChunker
-from stock_research_core.application.exceptions import LiveResearchRequesterContextError, StockResearchError
+from stock_research_core.application.exceptions import (
+    InvalidIntegrationClientIdentifierError,
+    LiveResearchRequesterContextError,
+    StockResearchError,
+)
+from stock_research_core.application.operations.integration_client_admin_service import (
+    IntegrationClientAdminService,
+)
 from stock_research_core.application.operations.service import BackgroundJobService
 from stock_research_core.domain.ai_tutor.enums import KnowledgeApprovalStatus  # noqa: F401 - re-exported for parameters-file authors
 from stock_research_core.domain.models import utc_now
@@ -96,6 +118,19 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--create-integration-client", action="store_true")
     parser.add_argument("--list-integration-clients", action="store_true")
     parser.add_argument("--revoke-integration-client", default=None, metavar="UUID")
+    parser.add_argument(
+        "--grant-integration-job-type", default=None, metavar="INTEGRATION_UUID",
+        help="Grant --job-type to an existing integration client, without rotating its API key.",
+    )
+    parser.add_argument(
+        "--revoke-integration-job-type", default=None, metavar="INTEGRATION_UUID",
+        help="Revoke --job-type from an existing integration client. An ACTIVE client can never be "
+        "revoked down to zero allowed job types.",
+    )
+    parser.add_argument(
+        "--job-type", default=None, metavar="BACKGROUND_JOB_TYPE", choices=[t.value for t in BackgroundJobType],
+        help="Required with --grant-integration-job-type/--revoke-integration-job-type.",
+    )
     parser.add_argument("--create-job", default=None, metavar="JOB_TYPE", choices=[t.value for t in BackgroundJobType])
     parser.add_argument("--job-status", default=None, metavar="UUID")
     parser.add_argument("--requeue-job", default=None, metavar="UUID")
@@ -159,6 +194,46 @@ async def _revoke_integration_client(uow_factory, *, integration_id: str) -> Non
         updated = await uow.integration_clients.set_status(UUID(integration_id), status=IntegrationClientStatus.REVOKED)
         await uow.commit()
     print(f"Revoked integration client: {updated.integration_id} <{updated.name}>")
+
+
+def _print_integration_client(client: IntegrationClient, *, action: str) -> None:
+    # Never prints api_key_hash, a raw secret, or any provider credential -
+    # only identity, status, and the (public, non-secret) allowed job types.
+    allowed = ",".join(job_type.value for job_type in client.allowed_job_types)
+    print(f"{action}: {client.integration_id} <{client.name}> status={client.status.value}")
+    print(f"  allowed_job_types: {allowed}")
+
+
+def _parse_integration_client_uuid(raw_value: str) -> UUID:
+    # Never includes `raw_value` in the raised error (Correction V2) - a
+    # malformed CLI argument must produce a bounded, generic message, not
+    # an echo of the rejected input or an unhandled traceback.
+    try:
+        return UUID(raw_value)
+    except (ValueError, AttributeError, TypeError) as exc:
+        raise InvalidIntegrationClientIdentifierError(
+            "The provided integration client id is not a valid UUID."
+        ) from exc
+
+
+async def _grant_integration_job_type(
+    admin_service: IntegrationClientAdminService, *, integration_id: str, job_type: str
+) -> None:
+    parsed_integration_id = _parse_integration_client_uuid(integration_id)
+    updated = await admin_service.grant_job_type(
+        integration_id=parsed_integration_id, job_type=BackgroundJobType(job_type)
+    )
+    _print_integration_client(updated, action="Granted")
+
+
+async def _revoke_integration_job_type(
+    admin_service: IntegrationClientAdminService, *, integration_id: str, job_type: str
+) -> None:
+    parsed_integration_id = _parse_integration_client_uuid(integration_id)
+    updated = await admin_service.revoke_job_type(
+        integration_id=parsed_integration_id, job_type=BackgroundJobType(job_type)
+    )
+    _print_integration_client(updated, action="Revoked")
 
 
 def _parse_requester_uuid(raw_value: str | None, *, option: str) -> UUID | None:
@@ -280,6 +355,7 @@ async def _run(args: argparse.Namespace) -> int:
         unit_of_work_factory=uow_factory, job_registry=registry, job_queue=CeleryJobQueue(celery_app),
         lock_port=RedisDistributedLock(redis_client),
     )
+    integration_admin_service = IntegrationClientAdminService(unit_of_work_factory=uow_factory)
 
     try:
         if args.create_integration_client:
@@ -295,6 +371,24 @@ async def _run(args: argparse.Namespace) -> int:
 
         if args.revoke_integration_client:
             await _revoke_integration_client(uow_factory, integration_id=args.revoke_integration_client)
+            return 0
+
+        if args.grant_integration_job_type:
+            if not args.job_type:
+                print("error: --grant-integration-job-type requires --job-type", file=sys.stderr)
+                return 2
+            await _grant_integration_job_type(
+                integration_admin_service, integration_id=args.grant_integration_job_type, job_type=args.job_type
+            )
+            return 0
+
+        if args.revoke_integration_job_type:
+            if not args.job_type:
+                print("error: --revoke-integration-job-type requires --job-type", file=sys.stderr)
+                return 2
+            await _revoke_integration_job_type(
+                integration_admin_service, integration_id=args.revoke_integration_job_type, job_type=args.job_type
+            )
             return 0
 
         if args.create_job:
@@ -316,7 +410,8 @@ async def _run(args: argparse.Namespace) -> int:
 
         print(
             "error: specify one of --create-integration-client, --list-integration-clients, "
-            "--revoke-integration-client, --create-job, --job-status, or --requeue-job",
+            "--revoke-integration-client, --grant-integration-job-type, --revoke-integration-job-type, "
+            "--create-job, --job-status, or --requeue-job",
             file=sys.stderr,
         )
         return 2

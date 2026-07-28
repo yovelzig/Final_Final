@@ -214,6 +214,125 @@ class TestIntegrationClientRepository:
             BackgroundJobType.TRACKED_MARKET_REFRESH, BackgroundJobType.RETRIEVAL_EVALUATION,
         }
 
+    async def test_get_for_update_returns_the_client_and_holds_a_row_lock(self, uow_factory) -> None:
+        client = IntegrationClient(
+            name="n8n", key_id=f"key-{uuid4().hex[:12]}", api_key_hash="e" * 64,
+            allowed_job_types=[BackgroundJobType.LIVE_RESEARCH_RUN_EXECUTION],
+        )
+        async with uow_factory() as uow:
+            created = await uow.integration_clients.create(client)
+            await uow.commit()
+
+        async with uow_factory() as uow:
+            locked = await uow.integration_clients.get_for_update(created.integration_id)
+            await uow.commit()
+        assert locked is not None
+        assert locked.integration_id == created.integration_id
+
+    async def test_get_for_update_returns_none_for_unknown_client(self, uow_factory) -> None:
+        async with uow_factory() as uow:
+            result = await uow.integration_clients.get_for_update(uuid4())
+        assert result is None
+
+    async def test_add_allowed_job_type_is_idempotent(self, uow_factory) -> None:
+        client = IntegrationClient(
+            name="n8n", key_id=f"key-{uuid4().hex[:12]}", api_key_hash="f" * 64,
+            allowed_job_types=[BackgroundJobType.RETRIEVAL_EVALUATION],
+        )
+        async with uow_factory() as uow:
+            created = await uow.integration_clients.create(client)
+            await uow.commit()
+
+        async with uow_factory() as uow:
+            await uow.integration_clients.add_allowed_job_type(
+                created.integration_id, BackgroundJobType.LIVE_RESEARCH_RUN_EXECUTION
+            )
+            await uow.integration_clients.add_allowed_job_type(
+                created.integration_id, BackgroundJobType.LIVE_RESEARCH_RUN_EXECUTION
+            )
+            await uow.commit()
+
+        async with uow_factory() as uow:
+            fetched = await uow.integration_clients.get_by_id(created.integration_id)
+        assert set(fetched.allowed_job_types) == {
+            BackgroundJobType.RETRIEVAL_EVALUATION, BackgroundJobType.LIVE_RESEARCH_RUN_EXECUTION,
+        }
+
+    async def test_remove_allowed_job_type_is_idempotent(self, uow_factory) -> None:
+        client = IntegrationClient(
+            name="n8n", key_id=f"key-{uuid4().hex[:12]}", api_key_hash="0" * 64,
+            allowed_job_types=[BackgroundJobType.RETRIEVAL_EVALUATION, BackgroundJobType.LIVE_RESEARCH_RUN_EXECUTION],
+        )
+        async with uow_factory() as uow:
+            created = await uow.integration_clients.create(client)
+            await uow.commit()
+
+        async with uow_factory() as uow:
+            await uow.integration_clients.remove_allowed_job_type(
+                created.integration_id, BackgroundJobType.LIVE_RESEARCH_RUN_EXECUTION
+            )
+            await uow.integration_clients.remove_allowed_job_type(
+                created.integration_id, BackgroundJobType.LIVE_RESEARCH_RUN_EXECUTION
+            )
+            await uow.commit()
+
+        async with uow_factory() as uow:
+            fetched = await uow.integration_clients.get_by_id(created.integration_id)
+        assert fetched.allowed_job_types == [BackgroundJobType.RETRIEVAL_EVALUATION]
+
+    async def test_grant_and_revoke_through_the_admin_service_round_trip_against_postgres(self, uow_factory) -> None:
+        """End-to-end (real PostgreSQL) exercise of
+        `IntegrationClientAdminService`, complementing the fully in-memory
+        unit tests in `test_integration_client_admin_service.py`."""
+        from stock_research_core.application.operations.integration_client_admin_service import (
+            IntegrationClientAdminService,
+        )
+
+        client = IntegrationClient(
+            name="n8n", key_id=f"key-{uuid4().hex[:12]}", api_key_hash="1" * 64,
+            allowed_job_types=[BackgroundJobType.RETRIEVAL_EVALUATION],
+        )
+        async with uow_factory() as uow:
+            created = await uow.integration_clients.create(client)
+            await uow.commit()
+
+        admin_service = IntegrationClientAdminService(unit_of_work_factory=uow_factory)
+        granted = await admin_service.grant_job_type(
+            integration_id=created.integration_id, job_type=BackgroundJobType.LIVE_RESEARCH_RUN_EXECUTION
+        )
+        assert set(granted.allowed_job_types) == {
+            BackgroundJobType.RETRIEVAL_EVALUATION, BackgroundJobType.LIVE_RESEARCH_RUN_EXECUTION,
+        }
+
+        revoked = await admin_service.revoke_job_type(
+            integration_id=created.integration_id, job_type=BackgroundJobType.LIVE_RESEARCH_RUN_EXECUTION
+        )
+        assert revoked.allowed_job_types == [BackgroundJobType.RETRIEVAL_EVALUATION]
+
+    async def test_admin_service_rejects_stripping_the_final_permission_of_an_active_client(self, uow_factory) -> None:
+        from stock_research_core.application.exceptions import IntegrationClientFinalJobTypeError
+        from stock_research_core.application.operations.integration_client_admin_service import (
+            IntegrationClientAdminService,
+        )
+
+        client = IntegrationClient(
+            name="n8n", key_id=f"key-{uuid4().hex[:12]}", api_key_hash="2" * 64,
+            status=IntegrationClientStatus.ACTIVE, allowed_job_types=[BackgroundJobType.LIVE_RESEARCH_RUN_EXECUTION],
+        )
+        async with uow_factory() as uow:
+            created = await uow.integration_clients.create(client)
+            await uow.commit()
+
+        admin_service = IntegrationClientAdminService(unit_of_work_factory=uow_factory)
+        with pytest.raises(IntegrationClientFinalJobTypeError):
+            await admin_service.revoke_job_type(
+                integration_id=created.integration_id, job_type=BackgroundJobType.LIVE_RESEARCH_RUN_EXECUTION
+            )
+
+        async with uow_factory() as uow:
+            unchanged = await uow.integration_clients.get_by_id(created.integration_id)
+        assert unchanged.allowed_job_types == [BackgroundJobType.LIVE_RESEARCH_RUN_EXECUTION]
+
     async def test_set_status_and_update_last_used(self, uow_factory) -> None:
         client = IntegrationClient(
             name="n8n", key_id=f"key-{uuid4().hex[:12]}", api_key_hash="b" * 64,
