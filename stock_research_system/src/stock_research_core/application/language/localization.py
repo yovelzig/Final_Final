@@ -39,24 +39,25 @@ LOCALIZED_STRINGS: dict[LocalizedMessageKey, dict[DetectedLanguage, str]] = {
     },
     LocalizedMessageKey.RESEARCH_UNAVAILABLE: {
         DetectedLanguage.EN: "Current research is temporarily unavailable. Please try again shortly.",
-        DetectedLanguage.HE: "×ž×—×§×¨ ×¢×“×›× ×™ ××™× ×• ×–×ž×™×Ÿ ×›×¨×’×¢. × ×¡×” ×©×•×‘ ×‘×¢×•×“ ×–×ž×Ÿ ×§×¦×¨.",
+        DetectedLanguage.HE: "מחקר עדכני אינו זמין כרגע. נסה שוב בעוד זמן קצר.",
     },
     LocalizedMessageKey.RESEARCH_WAITING: {
         DetectedLanguage.EN: "I'm gathering current information to answer that - this may take a moment.",
-        DetectedLanguage.HE: "×× ×™ ××•×¡×£ ×ž×™×“×¢ ×¢×“×›× ×™ ×›×“×™ ×œ×¢× ×•×ª ×¢×œ ×›×š - ×–×” ×¢×©×•×™ ×œ×§×—×ª ×¨×’×¢.",
+        DetectedLanguage.HE: "אני אוסף מידע עדכני כדי לענות על כך - זה עשוי לקחת רגע.",
     },
     LocalizedMessageKey.RESEARCH_NO_EVIDENCE: {
         DetectedLanguage.EN: "I looked for current, approved information on that but couldn't find enough to answer reliably.",
-        DetectedLanguage.HE: "×—×™×¤×©×ª×™ ×ž×™×“×¢ ×¢×“×›× ×™ ×•×ž××•×©×¨ ×‘× ×•×©× ×–×” ××š ×œ× ×ž×¦××ª×™ ×ž×¡×¤×™×§ ×›×“×™ ×œ×¢× ×•×ª ×‘×‘×™×˜×—×•×Ÿ.",
+        DetectedLanguage.HE: "חיפשתי מידע עדכני ומאושר בנושא זה אך לא מצאתי מספיק כדי לענות בביטחון.",
     },
     LocalizedMessageKey.PROVIDER_FAILURE: {
         DetectedLanguage.EN: "I couldn't complete that research request right now. Please try again shortly.",
-        DetectedLanguage.HE: "×œ× ×”×¦×œ×—×ª×™ ×œ×”×©×œ×™× ××ª ×‘×§×©×ª ×”×ž×—×§×¨ ×›×¢×ª. × ×¡×” ×©×•×‘ ×‘×¢×•×“ ×–×ž×Ÿ ×§×¦×¨.",
+        DetectedLanguage.HE: "לא הצלחתי להשלים את בקשת המחקר כעת. נסה שוב בעוד זמן קצר.",
     },
     LocalizedMessageKey.CLARIFICATION_NEEDED_COMPANY: {
         DetectedLanguage.EN: "Please specify the company name or ticker symbol you want me to research.",
-        DetectedLanguage.HE: "× × ×œ×¦×™×™×Ÿ ××ª ×©× ×”×—×‘×¨×” ××• ×¡×™×ž×•×œ ×”×ž× ×™×” ×©×‘×¨×¦×•× ×š ×œ×—×§×•×¨.",
-    },}
+        DetectedLanguage.HE: "נא לציין את שם החברה או סימול המניה שברצונך לחקור.",
+    },
+}
 
 
 def localize(key: LocalizedMessageKey, *, language: DetectedLanguage) -> str:

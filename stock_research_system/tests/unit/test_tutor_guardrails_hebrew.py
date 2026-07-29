@@ -137,6 +137,7 @@ class TestApplyTopicVocabularyCheckFlag:
         decision = guardrail.evaluate_input(
             conversation_id=uuid4(), message=message, context=_general_context(),
             language=DetectedLanguage.HE, apply_topic_vocabulary_check=True,
+            apply_hebrew_topic_vocabulary_check=False,
         )
         assert decision.action == TutorGuardrailAction.FALLBACK
 

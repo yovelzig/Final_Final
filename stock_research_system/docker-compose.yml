@@ -165,7 +165,6 @@ services:
       # Spec G2D2 section 6: shared EN/HE query bridge - disabled by
       # default; when disabled every Hebrew question is retrieved with
       # its own untranslated text, exactly as before this phase.
-      HEBREW_QUERY_BRIDGE_ENABLED: ${HEBREW_QUERY_BRIDGE_ENABLED:-false}
       # Spec G2D2 section 10: optional OpenAI reasoning tutor provider -
       # disabled by default; every complex-question/Ollama-failure route
       # still falls back to Ollama, never leaving a learner ungrounded.

@@ -52,16 +52,11 @@ class ModelTranslationAdapter:
 
 
 def build_language_bridge(*, enabled: bool, tutor_model: TutorModelPort) -> LanguageBridgeService:
-    """The one place `HEBREW_QUERY_BRIDGE_ENABLED` is turned into a real
-    `LanguageBridgeService` - every composition root (API process,
-    `finquest-worker-coach`) calls this the same way rather than each
-    deciding independently whether/how to build a `ModelTranslationAdapter`.
-    When `enabled=False`, `translator=None` is passed through -
-    `LanguageBridgeService.prepare_retrieval_query` already treats a
-    `None` translator exactly like a disabled bridge, so this still
-    returns a valid, harmless service rather than `None` itself; callers
-    that want the pre-Phase-6 "no language bridge object at all" behavior
-    simply don't call this function and pass `language_bridge=None`
-    directly to `GroundedAITutorService`."""
+    """Build the original G2D2 bridge for callers of that explicit API.
+
+    Current tutor and worker composition roots use the provider-neutral
+    `LanguageServicePort` through `build_language_service`. This helper is
+    retained for direct bridge consumers and compatibility tests; it is not a
+    `GroundedAITutorService` constructor dependency."""
     translator = ModelTranslationAdapter(tutor_model=tutor_model) if enabled else None
     return LanguageBridgeService(translator=translator, enabled=enabled)

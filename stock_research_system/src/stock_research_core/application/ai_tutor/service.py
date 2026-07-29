@@ -85,6 +85,7 @@ from stock_research_core.application.exceptions import (
     TutorConversationNotFoundError,
 )
 from stock_research_core.application.language.enums import DetectedLanguage, LocalizedMessageKey
+from stock_research_core.application.language.localization import localize
 from stock_research_core.application.language.ports import LanguageServicePort
 from stock_research_core.application.language.query_preparation import (
     LanguageQueryPreparation,
@@ -125,7 +126,7 @@ _WHITESPACE_PATTERN = re.compile(r"\s+")
 #: answer, with the same citations, in the learner's own language.
 _ANSWER_LANGUAGE_REPAIR_INSTRUCTION = (
     "\nCORRECTION: your previous answer was not written in Hebrew. Rewrite that same answer "
-    "entirely in Hebrew (Ãƒâ€”Ã‚Â¢Ãƒâ€”Ã¢â‚¬ËœÃƒâ€”Ã‚Â¨Ãƒâ€”Ã¢â€žÂ¢Ãƒâ€”Ã‚Âª), using only the approved evidence already listed above and the "
+    "entirely in Hebrew (עברית), using only the approved evidence already listed above and the "
     "same bracket citations. Do not add any new fact, source, or citation number that was not "
     "already present.\n"
 )
@@ -483,6 +484,7 @@ class GroundedAITutorService:
         return self._guardrail.evaluate_input(
             conversation_id=conversation_id, message=user_message, context=context,
             language=language, apply_topic_vocabulary_check=language != DetectedLanguage.HE,
+            apply_hebrew_topic_vocabulary_check=self._language_service_enabled,
         )
 
     def _decide_with_translation(
@@ -706,7 +708,11 @@ class GroundedAITutorService:
         language: DetectedLanguage = DetectedLanguage.EN,
         retrieval_run_id: UUID | None,
     ) -> TutorResponse:
-        fallback_text = self._language_service.localize(LocalizedMessageKey.INSUFFICIENT_EVIDENCE, language=language)
+        fallback_text = (
+            self._language_service.localize(LocalizedMessageKey.INSUFFICIENT_EVIDENCE, language=language)
+            if self._language_service_enabled
+            else localize(LocalizedMessageKey.INSUFFICIENT_EVIDENCE, language=DetectedLanguage.EN)
+        )
         answer = TutorAnswer(
             conversation_id=conversation.conversation_id,
             request_message_id=user_message.message_id,

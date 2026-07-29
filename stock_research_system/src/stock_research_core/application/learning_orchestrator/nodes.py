@@ -561,7 +561,7 @@ class GraphNodes:
             LocalizedMessageKey.INSUFFICIENT_EVIDENCE, language=detected_language
         )
         suggestion = (
-            " Ã—Â Ã—Â¡Ã—â€/Ã—â„¢ Ã—Å“Ã—Â©Ã—ÂÃ—â€¢Ã—Å“ Ã—Â¢Ã—Å“ Ã—Å¾Ã—â€¢Ã—Â©Ã—â€™ Ã—Â¤Ã—â„¢Ã—Â Ã—Â Ã—Â¡Ã—â„¢-Ã—â€”Ã—â„¢Ã—Â Ã—â€¢Ã—â€ºÃ—â„¢ Ã—Â¡Ã—Â¤Ã—Â¦Ã—â„¢Ã—Â¤Ã—â„¢, Ã—â€Ã—â€Ã—ÂªÃ—Â§Ã—â€œÃ—Å¾Ã—â€¢Ã—Âª Ã—Â©Ã—Å“Ã—Å¡, Ã—Â©Ã—â„¢Ã—Â¢Ã—â€¢Ã—Â¨, Ã—ÂªÃ—Â¨Ã—â€™Ã—â„¢Ã—Å“, Ã—ÂªÃ—Â¨Ã—â€”Ã—â„¢Ã—Â©, Ã—ÂÃ—â€¢ Ã—ÂªÃ—â„¢Ã—Â§ Ã—â€Ã—â€Ã—Â©Ã—Â§Ã—Â¢Ã—â€¢Ã—Âª Ã—Â©Ã—Å“Ã—Å¡."
+            " נסה/י לשאול על מושג פיננסי-חינוכי ספציפי, ההתקדמות שלך, שיעור, תרגיל, תרחיש, או תיק ההשקעות שלך."
             if detected_language == DetectedLanguage.HE
             else (
                 " Try asking about a specific financial-education concept, your progress, a lesson, an "

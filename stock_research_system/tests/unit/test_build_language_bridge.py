@@ -1,7 +1,4 @@
-"""Unit tests for `infrastructure.language.model_translation_adapter.
-build_language_bridge` (spec G2D2 section 6/11) - the one place
-`HEBREW_QUERY_BRIDGE_ENABLED` is turned into a real `LanguageBridgeService`,
-shared by every composition root."""
+"""Unit tests for the legacy `build_language_bridge` compatibility helper."""
 
 from __future__ import annotations
 

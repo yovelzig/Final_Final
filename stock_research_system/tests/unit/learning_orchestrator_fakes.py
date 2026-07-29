@@ -422,12 +422,17 @@ class FakeTutorService:
         self.answer_markdown = answer_markdown
         self.grounding_status = grounding_status
         self.asked_questions: list[str] = []
+        self.prepared_languages: list[Any] = []
 
     async def create_conversation(self, *, learner_id: UUID, context: Any) -> SimpleNamespace:
         return SimpleNamespace(conversation_id=uuid4())
 
-    async def ask(self, *, conversation_id: UUID, question: str, context: Any = None) -> SimpleNamespace:
+    async def ask(
+        self, *, conversation_id: UUID, question: str, top_k: int = 8,
+        context: Any = None, prepared_language: Any = None,
+    ) -> SimpleNamespace:
         self.asked_questions.append(question)
+        self.prepared_languages.append(prepared_language)
         return SimpleNamespace(
             citations=[],
             answer=SimpleNamespace(answer_markdown=self.answer_markdown, grounding_status=self.grounding_status),
