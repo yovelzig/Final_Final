@@ -21,7 +21,7 @@ _MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "migrations" / "versions
 #: The Alembic head at the point this dashboard work started. The skill
 #: name already lived on `financial_skills`, so nothing here needed a
 #: schema change - a new head would mean one was added.
-_EXPECTED_MIGRATION_HEAD = "0012_live_research_domain"
+_EXPECTED_MIGRATION_HEAD = "0013_coach_research_correlation"
 
 
 def _mastery(skill_id) -> SkillMastery:
