@@ -119,7 +119,10 @@ async def build_learning_orchestrator_runtime(
         to_psycopg_conninfo(database_url), min_size=settings.langgraph_checkpointer_pool_min_size,
         max_size=settings.langgraph_checkpointer_pool_max_size,
     )
-    await checkpointer_pool.open()
+    await checkpointer_pool.open(
+        wait=True,
+        timeout=30,
+    )
     checkpointer = build_checkpointer(checkpointer_pool)
 
     language_service = language_service or UnavailableLanguageService()

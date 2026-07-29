@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from dataclasses import dataclass
 from typing import Any
 
@@ -134,6 +135,169 @@ class WorkerContext:
 
 
 _worker_context: WorkerContext | None = None
+_worker_event_loop: asyncio.AbstractEventLoop | None = None
+_worker_event_loop_thread: threading.Thread | None = None
+
+
+def _worker_event_loop_main(
+    loop: asyncio.AbstractEventLoop,
+    ready: threading.Event,
+) -> None:
+    """Run the process-owned asyncio loop for the worker lifetime."""
+    asyncio.set_event_loop(loop)
+    loop.call_soon(ready.set)
+
+    try:
+        loop.run_forever()
+    finally:
+        pending = [
+            task
+            for task in asyncio.all_tasks(loop)
+            if not task.done()
+        ]
+
+        for task in pending:
+            task.cancel()
+
+        if pending:
+            loop.run_until_complete(
+                asyncio.gather(
+                    *pending,
+                    return_exceptions=True,
+                )
+            )
+
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        loop.run_until_complete(
+            loop.shutdown_default_executor()
+        )
+        asyncio.set_event_loop(None)
+        loop.close()
+
+
+def _ensure_worker_event_loop() -> asyncio.AbstractEventLoop:
+    """Return the single live asyncio loop owned by this process."""
+    global _worker_event_loop
+    global _worker_event_loop_thread
+
+    if (
+        _worker_event_loop is not None
+        and _worker_event_loop_thread is not None
+        and _worker_event_loop_thread.is_alive()
+        and _worker_event_loop.is_running()
+    ):
+        return _worker_event_loop
+
+    if (
+        _worker_event_loop is not None
+        or _worker_event_loop_thread is not None
+    ):
+        raise RuntimeError(
+            "Celery worker asyncio loop is in an inconsistent state."
+        )
+
+    loop = asyncio.new_event_loop()
+    ready = threading.Event()
+    thread = threading.Thread(
+        target=_worker_event_loop_main,
+        args=(loop, ready),
+        name="finquest-worker-asyncio",
+        daemon=True,
+    )
+
+    _worker_event_loop = loop
+    _worker_event_loop_thread = thread
+    thread.start()
+
+    if not ready.wait(timeout=10):
+        if loop.is_running():
+            loop.call_soon_threadsafe(loop.stop)
+
+        thread.join(timeout=2)
+        _worker_event_loop = None
+        _worker_event_loop_thread = None
+
+        raise RuntimeError(
+            "Celery worker asyncio loop did not start."
+        )
+
+    if not thread.is_alive() or not loop.is_running():
+        _worker_event_loop = None
+        _worker_event_loop_thread = None
+
+        raise RuntimeError(
+            "Celery worker asyncio loop stopped during startup."
+        )
+
+    return loop
+
+
+def _run_async(coroutine: Any) -> Any:
+    """Run a coroutine on the process-owned worker event loop."""
+    loop = _ensure_worker_event_loop()
+    thread = _worker_event_loop_thread
+
+    if (
+        thread is not None
+        and threading.current_thread() is thread
+    ):
+        close = getattr(coroutine, "close", None)
+
+        if callable(close):
+            close()
+
+        raise RuntimeError(
+            "_run_async cannot block from its own event-loop thread."
+        )
+
+    future = asyncio.run_coroutine_threadsafe(
+        coroutine,
+        loop,
+    )
+
+    try:
+        return future.result()
+    except BaseException:
+        future.cancel()
+        raise
+
+
+def _stop_worker_event_loop() -> None:
+    """Stop and join the process-owned event-loop thread."""
+    global _worker_event_loop
+    global _worker_event_loop_thread
+
+    loop = _worker_event_loop
+    thread = _worker_event_loop_thread
+
+    if loop is None and thread is None:
+        return
+
+    if loop is None or thread is None:
+        _worker_event_loop = None
+        _worker_event_loop_thread = None
+
+        raise RuntimeError(
+            "Celery worker asyncio loop is in an inconsistent state."
+        )
+
+    if threading.current_thread() is thread:
+        raise RuntimeError(
+            "Worker event loop cannot stop itself."
+        )
+
+    if loop.is_running():
+        loop.call_soon_threadsafe(loop.stop)
+
+    thread.join(timeout=15)
+
+    if thread.is_alive():
+        raise RuntimeError(
+            "Celery worker asyncio loop did not stop."
+        )
+
+    _worker_event_loop = None
+    _worker_event_loop_thread = None
 
 
 def _build_worker_context(
@@ -266,7 +430,7 @@ def _build_worker_context(
         # unconfigured - `synthesize_research_response` then takes the
         # bounded provider-unavailable path, never a model call.
         research_model_router = build_research_model(ResearchModelSettings())
-        composition = asyncio.run(
+        composition = _run_async(
             build_learning_orchestrator_runtime(
                 settings=learning_orchestrator_settings, database_url=database_settings.database_url,
                 unit_of_work_factory=uow_factory, embedding_provider=embedding_provider, tutor_model=tutor_model,
@@ -306,23 +470,50 @@ def get_worker_context() -> WorkerContext:
 
 @worker_process_init.connect
 def _init_worker_process(**_kwargs: Any) -> None:
+    _ensure_worker_event_loop()
     get_worker_context()
+
+
+async def _close_worker_context(
+    context: WorkerContext,
+) -> None:
+    """Close async resources on the loop that owns them."""
+    await close_language_service(context.language_service)
+
+    if (
+        context.learning_orchestrator_checkpointer_pool
+        is not None
+    ):
+        await (
+            context
+            .learning_orchestrator_checkpointer_pool
+            .close()
+        )
+
+    if context.cik_resolver is not None:
+        await context.cik_resolver.aclose()
+
+    if context.research_model_router is not None:
+        await close_research_model(
+            context.research_model_router
+        )
 
 
 @worker_process_shutdown.connect
 def _shutdown_worker_process(**_kwargs: Any) -> None:
-    """Close every process-owned client exactly once."""
+    """Close all owned clients and the process event loop once."""
     global _worker_context
-    if _worker_context is None:
-        return
-    asyncio.run(close_language_service(_worker_context.language_service))
-    if _worker_context.learning_orchestrator_checkpointer_pool is not None:
-        asyncio.run(_worker_context.learning_orchestrator_checkpointer_pool.close())
-    if _worker_context.cik_resolver is not None:
-        asyncio.run(_worker_context.cik_resolver.aclose())
-    if _worker_context.research_model_router is not None:
-        asyncio.run(close_research_model(_worker_context.research_model_router))
-    _worker_context = None
+
+    context = _worker_context
+
+    try:
+        if context is not None:
+            _run_async(
+                _close_worker_context(context)
+            )
+    finally:
+        _worker_context = None
+        _stop_worker_event_loop()
 
 
 async def _execute_job(job_id: str, *, task_name: str, celery_task_id: str) -> dict[str, Any]:
@@ -347,10 +538,6 @@ async def _execute_job(job_id: str, *, task_name: str, celery_task_id: str) -> d
         return {"status": "ERROR", "error": type(exc).__name__}
     finally:
         clear_log_context()
-
-
-def _run_async(coroutine: Any) -> Any:
-    return asyncio.run(coroutine)
 
 
 def _make_task(job_type: BackgroundJobType):
