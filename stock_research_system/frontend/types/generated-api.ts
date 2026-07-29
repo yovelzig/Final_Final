@@ -1076,6 +1076,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/integrations/n8n/jobs/{job_id}/live-research/evidence": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get a bounded, provenance-safe evidence page for a completed Live Research job this integration client created */
+        get: operations["get_job_live_research_evidence_api_v1_integrations_n8n_jobs__job_id__live_research_evidence_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/integrations/n8n/ready": {
         parameters: {
             query?: never;
@@ -2111,7 +2128,7 @@ export interface components {
          * BackgroundJobType
          * @enum {string}
          */
-        BackgroundJobType: "TRACKED_MARKET_REFRESH" | "SECURITY_MARKET_REFRESH" | "PORTFOLIO_VALUATION" | "PORTFOLIO_BATCH_VALUATION" | "CURRICULUM_KNOWLEDGE_REFRESH" | "LOCAL_DOCUMENT_INGESTION" | "KNOWLEDGE_REEMBED" | "RETRIEVAL_EVALUATION" | "KNOWLEDGE_GAP_SUMMARY" | "SYSTEM_MAINTENANCE" | "RAGAS_QUALITY_EVALUATION" | "LEARNING_QUALITY_AGGREGATION" | "QUALITY_BASELINE_COMPARISON";
+        BackgroundJobType: "TRACKED_MARKET_REFRESH" | "SECURITY_MARKET_REFRESH" | "PORTFOLIO_VALUATION" | "PORTFOLIO_BATCH_VALUATION" | "CURRICULUM_KNOWLEDGE_REFRESH" | "LOCAL_DOCUMENT_INGESTION" | "KNOWLEDGE_REEMBED" | "RETRIEVAL_EVALUATION" | "KNOWLEDGE_GAP_SUMMARY" | "SYSTEM_MAINTENANCE" | "RAGAS_QUALITY_EVALUATION" | "LEARNING_QUALITY_AGGREGATION" | "QUALITY_BASELINE_COMPARISON" | "LIVE_RESEARCH_RUN_EXECUTION";
         /** Body_import_suite_api_v1_admin_evaluations_suites_import_post */
         Body_import_suite_api_v1_admin_evaluations_suites_import_post: {
             /** File */
@@ -2445,6 +2462,55 @@ export interface components {
              * Format: uuid
              */
             run_id: string;
+        };
+        /**
+         * EvidenceClassification
+         * @enum {string}
+         */
+        EvidenceClassification: "OFFICIAL" | "NON_OFFICIAL";
+        /**
+         * EvidenceItemSummary
+         * @description A bounded, provenance-safe view of one `EvidenceItem`. Excludes
+         *     `raw_excerpt`, `normalized_text`, `structured_facts`, and any
+         *     provider metadata - never a raw provider response.
+         */
+        EvidenceItemSummary: {
+            classification: components["schemas"]["EvidenceClassification"];
+            /**
+             * Evidence Id
+             * Format: uuid
+             */
+            evidence_id: string;
+            /** Official Identifier */
+            official_identifier?: string | null;
+            /** Published At */
+            published_at?: string | null;
+            /** Publisher */
+            publisher: string;
+            /** Source Title */
+            source_title: string;
+            source_type: components["schemas"]["SourceType"];
+            /** Source Url */
+            source_url?: string | null;
+        };
+        /**
+         * EvidencePageResponse
+         * @description A single database-paginated page of `EvidenceItemSummary` rows for
+         *     one completed `ResearchRun`. `has_more` is `True` only when the
+         *     repository returned an extra (`limit + 1`-th) row - the router never
+         *     issues an unbounded query or a separate `COUNT(*)`.
+         */
+        EvidencePageResponse: {
+            /** Has More */
+            has_more: boolean;
+            /** Items */
+            items: components["schemas"]["EvidenceItemSummary"][];
+            /** Limit */
+            limit: number;
+            /** Next Offset */
+            next_offset?: number | null;
+            /** Offset */
+            offset: number;
         };
         /**
          * Exchange
@@ -4236,7 +4302,17 @@ export interface components {
             reviews_scheduled: components["schemas"]["ReviewScheduleResponse"][];
             session: components["schemas"]["LearningSessionResponse"];
         };
-        /** SkillMasteryResponse */
+        /**
+         * SkillMasteryResponse
+         * @description One skill's mastery, including the canonical skill name so a client
+         *     never has to resolve (or display) the raw `skill_id`.
+         *
+         *     `skill_name`/`skill_code` are read from `financial_skills`, which stays
+         *     their single source of truth - nothing here is stored on the mastery
+         *     row. They are `null` only for a mastery row whose skill no longer
+         *     exists, and on `SubmitAnswerResponse.updated_mastery`, which reports
+         *     what the just-graded answer changed rather than a browsable list.
+         */
         SkillMasteryResponse: {
             /** Correct Attempts */
             correct_attempts: number;
@@ -4247,11 +4323,15 @@ export interface components {
             mastery_score: number;
             /** Next Review At */
             next_review_at: string | null;
+            /** Skill Code */
+            skill_code?: string | null;
             /**
              * Skill Id
              * Format: uuid
              */
             skill_id: string;
+            /** Skill Name */
+            skill_name?: string | null;
             /** Total Attempts */
             total_attempts: number;
         };
@@ -4275,6 +4355,11 @@ export interface components {
              */
             skill_id: string;
         };
+        /**
+         * SourceType
+         * @enum {string}
+         */
+        SourceType: "SEC_OFFICIAL_FILING" | "COMPANY_INVESTOR_RELATIONS" | "EXCHANGE_REGULATOR_GOVERNMENT" | "STRUCTURED_MARKET_DATA_PROVIDER" | "REPUTABLE_SECONDARY_SOURCE" | "DISCOVERY_ONLY" | "UNKNOWN_UNVERIFIED";
         /** StartAttemptRequest */
         StartAttemptRequest: {
             confidence_level?: components["schemas"]["ConfidenceLevel"] | null;
@@ -6857,6 +6942,43 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["JobEventResponse"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_job_live_research_evidence_api_v1_integrations_n8n_jobs__job_id__live_research_evidence_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+                offset?: number;
+            };
+            header?: {
+                "x-finquest-key-id"?: string | null;
+                "x-finquest-integration-key"?: string | null;
+            };
+            path: {
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EvidencePageResponse"];
                 };
             };
             /** @description Validation Error */

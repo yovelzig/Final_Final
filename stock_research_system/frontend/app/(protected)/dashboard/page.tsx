@@ -9,7 +9,7 @@ import { ErrorState } from "@/components/ui/ErrorState";
 import { Ltr } from "@/components/ui/Ltr";
 import { PageHeading } from "@/components/ui/PageHeading";
 import { LoadingSkeletonCard } from "@/components/ui/Skeleton";
-import { MasteryList } from "@/components/dashboard/MasteryList";
+import { FinancialSkillsProgress } from "@/components/dashboard/FinancialSkillsProgress";
 import { ProgressBar } from "@/components/ui/ProgressBar";
 import { formatCurrency } from "@/lib/formatting";
 import { interpolate } from "@/lib/i18n";
@@ -92,18 +92,18 @@ export default function DashboardPage() {
               ) : null}
             </Card>
 
-            {/* Mastery */}
+            {/* Financial skills progress */}
             <Card>
               <CardHeader>
-                <CardTitle>{t.dashboard.mastery.title}</CardTitle>
-                <CardDescription>{t.dashboard.mastery.description}</CardDescription>
+                <CardTitle>{t.dashboard.financialSkills.title}</CardTitle>
+                <CardDescription>{t.dashboard.financialSkills.description}</CardDescription>
               </CardHeader>
               {masteryQuery.isPending ? (
                 <LoadingSkeletonCard />
               ) : masteryQuery.isError ? (
                 <ErrorState error={masteryQuery.error} onRetry={() => void masteryQuery.refetch()} />
               ) : (
-                <MasteryList items={masteryQuery.data.items} />
+                <FinancialSkillsProgress items={masteryQuery.data.items} />
               )}
             </Card>
 

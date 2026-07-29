@@ -1,3 +1,25 @@
+import type { MasteryLevel } from "@/types/api-schemas";
+
+/**
+ * Canonical `financial_skills.code` values the curriculum seeds. Keyed by
+ * code, never by `skill_id`, so a translation survives a re-seed and can
+ * never be derived from an opaque identifier. A skill whose code is not
+ * listed here still renders - it falls back to the canonical English
+ * `skill_name` the backend returns.
+ */
+export type FinancialSkillCode =
+  | "MONEY_BASICS"
+  | "INFLATION"
+  | "COMPOUND_INTEREST"
+  | "STOCKS"
+  | "BONDS"
+  | "FUNDS_AND_ETFS"
+  | "RISK_AND_RETURN"
+  | "DIVERSIFICATION"
+  | "MARKET_INDEXES"
+  | "CHART_READING"
+  | "LONG_TERM_INVESTING";
+
 /**
  * The single source of truth for every translatable string in the MVP
  * surfaces (landing, auth, app shell, dashboard, tutor, coach, and the
@@ -155,19 +177,16 @@ export interface Dictionary {
       misconceptionsOne: string;
       misconceptionsOther: string;
     };
-    mastery: {
+    financialSkills: {
       title: string;
       description: string;
       emptyTitle: string;
       emptyDescription: string;
-      skillLabel: string;
-      levels: {
-        NOT_ASSESSED: string;
-        NOVICE: string;
-        DEVELOPING: string;
-        PROFICIENT: string;
-        MASTERED: string;
-      };
+      /** Used when a mastery row's skill metadata is missing. Never a
+       * `skill_id` - learners are shown a topic, not an identifier. */
+      fallbackSkillName: string;
+      levels: Record<MasteryLevel, string>;
+      skillNames: Record<FinancialSkillCode, string>;
     };
     portfolio: {
       title: string;

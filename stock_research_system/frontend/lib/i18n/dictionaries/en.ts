@@ -182,18 +182,34 @@ export const en = {
       misconceptionsOne: "1 active misconception to review",
       misconceptionsOther: "{count} active misconceptions to review",
     },
-    mastery: {
-      title: "Skill mastery",
-      description: "How you're doing across assessed skills.",
+    financialSkills: {
+      title: "Financial Skills Progress",
+      description: "See how your understanding is developing across core investing concepts.",
       emptyTitle: "No skills assessed yet",
       emptyDescription: "Complete a lesson or the diagnostic assessment to start building your skill profile.",
-      skillLabel: "Skill",
+      fallbackSkillName: "Financial topic",
       levels: {
-        NOT_ASSESSED: "Not assessed",
-        NOVICE: "Novice",
-        DEVELOPING: "Developing",
-        PROFICIENT: "Proficient",
+        NOT_ASSESSED: "Not started",
+        NOVICE: "Getting started",
+        DEVELOPING: "Building confidence",
+        PROFICIENT: "Strong understanding",
         MASTERED: "Mastered",
+      },
+      // The canonical curriculum names, matching `financial_skills.name`
+      // exactly - the backend value stays the fallback for any code that
+      // is not listed.
+      skillNames: {
+        MONEY_BASICS: "Money Basics",
+        INFLATION: "Inflation",
+        COMPOUND_INTEREST: "Compound Interest",
+        STOCKS: "Stocks",
+        BONDS: "Bonds",
+        FUNDS_AND_ETFS: "Funds and ETFs",
+        RISK_AND_RETURN: "Risk and Return",
+        DIVERSIFICATION: "Diversification",
+        MARKET_INDEXES: "Market Indexes",
+        CHART_READING: "Chart Reading",
+        LONG_TERM_INVESTING: "Long-Term Investing",
       },
     },
     portfolio: {

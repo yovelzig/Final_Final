@@ -28,6 +28,7 @@ from stock_research_core.application.learning import mastery as mastery_module
 from stock_research_core.application.learning import service as service_module
 from stock_research_core.application.learning.grading import grade_answer
 from stock_research_core.application.learning.mastery import DeterministicMasteryCalculator
+from stock_research_core.application.learning.models import SkillMasterySummary
 from stock_research_core.application.learning.service import LearningService
 from stock_research_core.domain.learning import enums as learning_enums_module
 from stock_research_core.domain.learning import models as learning_models_module
@@ -510,6 +511,7 @@ class FakeAttemptRepository:
 class FakeMasteryRepository:
     def __init__(self) -> None:
         self.mastery: dict[tuple[UUID, UUID], SkillMastery] = {}
+        self.skill_names: dict[UUID, str] = {}
 
     async def upsert(self, mastery: SkillMastery) -> SkillMastery:
         self.mastery[(mastery.learner_id, mastery.skill_id)] = mastery
@@ -520,6 +522,12 @@ class FakeMasteryRepository:
 
     async def list_for_learner(self, learner_id: UUID) -> list[SkillMastery]:
         return [m for m in self.mastery.values() if m.learner_id == learner_id]
+
+    async def list_for_learner_with_skill(self, learner_id: UUID) -> list[SkillMasterySummary]:
+        return [
+            SkillMasterySummary(mastery=m, skill_name=self.skill_names.get(m.skill_id))
+            for m in await self.list_for_learner(learner_id)
+        ]
 
 
 class FailingMasteryRepository(FakeMasteryRepository):

@@ -18,6 +18,7 @@ from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
+from stock_research_core.application.learning.models import SkillMasterySummary
 from stock_research_core.domain.learning.models import (
     Exercise,
     ExerciseAnswer,
@@ -124,6 +125,15 @@ class MasteryRepositoryPort(Protocol):
     async def get(self, learner_id: UUID, skill_id: UUID) -> SkillMastery | None: ...
 
     async def list_for_learner(self, learner_id: UUID) -> list[SkillMastery]: ...
+
+    async def list_for_learner_with_skill(
+        self, learner_id: UUID
+    ) -> list[SkillMasterySummary]:
+        """Same rows as `list_for_learner`, each already carrying its
+        skill's canonical name and code. Resolves every skill in the same
+        query, so a learner with N mastered skills still costs one
+        round trip - callers must never loop over `get_skill`."""
+        ...
 
 
 class ProgressRepositoryPort(Protocol):

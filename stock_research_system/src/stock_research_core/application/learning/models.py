@@ -48,6 +48,23 @@ class LessonWithExercises(DomainModel):
         return self
 
 
+class SkillMasterySummary(DomainModel):
+    """A learner's mastery of one skill, paired with that skill's canonical
+    curriculum metadata.
+
+    `Skill` stays the single source of truth for the name and code - they
+    are read alongside the mastery row rather than copied onto it. Both are
+    `None` only when the referenced `financial_skills` row no longer
+    exists; callers substitute their own placeholder rather than falling
+    back to `skill_id`, which is an internal identifier and never
+    something a learner should read.
+    """
+
+    mastery: SkillMastery
+    skill_name: str | None = None
+    skill_code: str | None = None
+
+
 class LearnerDashboard(DomainModel):
     """A learner's at-a-glance progress summary.
 
@@ -62,7 +79,7 @@ class LearnerDashboard(DomainModel):
     total_lessons: int = Field(default=0, ge=0)
     current_streak_days: int = Field(default=0, ge=0)
     total_xp: int = Field(default=0, ge=0)
-    skill_mastery: list[SkillMastery] = Field(default_factory=list)
+    skill_mastery: list[SkillMasterySummary] = Field(default_factory=list)
     active_misconceptions: list[Misconception] = Field(default_factory=list)
 
 
