@@ -18,6 +18,11 @@ class LearningOrchestratorRunStatus(StrEnum):
     CREATED = "CREATED"
     RUNNING = "RUNNING"
     WAITING_FOR_LEARNER = "WAITING_FOR_LEARNER"
+    #: The run has requested an automatic Live Research job (spec G2D2
+    #: section 11) and is paused at the `await_research_result` interrupt
+    #: until `COACH_RESEARCH_RESUME` resumes it - never set directly by a
+    #: learner action, only by the `request_live_research` graph node.
+    WAITING_FOR_RESEARCH = "WAITING_FOR_RESEARCH"
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
@@ -141,6 +146,9 @@ class LearningOrchestratorEventType(StrEnum):
     RUN_COMPLETED = "RUN_COMPLETED"
     RUN_FAILED = "RUN_FAILED"
     RUN_CANCELLED = "RUN_CANCELLED"
+    #: Spec G2D2 section 11: the automatic Live Research trigger.
+    RESEARCH_REQUESTED = "RESEARCH_REQUESTED"
+    RESEARCH_RESOLVED = "RESEARCH_RESOLVED"
 
 
 class IntentClassificationMethod(StrEnum):

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime, timedelta
+import logging
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -26,9 +27,19 @@ from stock_research_core.application.exceptions import (
     LockAcquisitionError,
     StockResearchError,
 )
+from stock_research_core.application.live_research.rate_limit_ports import AccountResearchRateLimiterPort
 from stock_research_core.application.operations.job_registry import BackgroundJobRegistry, JobRegistryEntry
-from stock_research_core.application.operations.locking import held_lock
-from stock_research_core.application.operations.models import JobCreationResult, JobExecutionResult
+from stock_research_core.application.operations.locking import (
+    coach_research_resume_resource_key,
+    expire_stale_waiting_for_research_resource_key,
+    held_lock,
+    reconcile_waiting_coach_runs_resource_key,
+)
+from stock_research_core.application.operations.models import (
+    CoachResearchResumeParameters,
+    JobCreationResult,
+    JobExecutionResult,
+)
 from stock_research_core.application.operations.ports import (
     DistributedLockPort,
     JobExecutionContext,
@@ -38,11 +49,13 @@ from stock_research_core.application.operations.ports import (
     TracingPort,
 )
 from stock_research_core.application.persistence.ports import UnitOfWorkPort
+from stock_research_core.domain.learning_orchestrator.enums import LearningOrchestratorRunStatus
 from stock_research_core.domain.models import utc_now
 from stock_research_core.domain.operations.enums import (
     TERMINAL_JOB_STATUSES,
     BackgroundJobPriority,
     BackgroundJobStatus,
+    BackgroundJobType,
     JobAttemptStatus,
     JobEventType,
     JobTriggerSource,
@@ -54,6 +67,7 @@ Clock = Callable[[], datetime]
 
 _LOCK_RETRY_DELAY_SECONDS = 15
 _JOB_VERSION = "1"
+_LOGGER = logging.getLogger(__name__)
 
 
 class _NoOpMetrics:
@@ -117,6 +131,7 @@ class BackgroundJobService:
         clock: Clock = utc_now,
         metrics: MetricsPort | None = None,
         tracing: TracingPort | None = None,
+        account_research_rate_limiter: AccountResearchRateLimiterPort | None = None,
     ) -> None:
         self._unit_of_work_factory = unit_of_work_factory
         self._job_registry = job_registry
@@ -125,6 +140,13 @@ class BackgroundJobService:
         self._clock = clock
         self._metrics = metrics or _NoOpMetrics()
         self._tracing = tracing or _NoOpTracing()
+        #: Spec G2D2/H1 correction pass, section 8: only needed by the
+        #: process that executes/completes `LIVE_RESEARCH_RUN_EXECUTION`
+        #: jobs (`_maybe_create_coach_resume_job` releases the per-account
+        #: concurrency slot here) - `None` everywhere else, including the
+        #: trigger-only `BackgroundJobService` `request_live_research`
+        #: itself uses just to call `create_job`.
+        self._account_research_rate_limiter = account_research_rate_limiter
 
     # -- creation -----------------------------------------------
 
@@ -366,6 +388,222 @@ class BackgroundJobService:
             await uow.commit()
         self._metrics.increment_counter("finquest_job_lock_failures_total")
 
+    async def _maybe_create_coach_resume_job(self, uow: UnitOfWorkPort, job: BackgroundJob) -> BackgroundJob | None:
+        """Spec G2D2 section 13: called from *inside* the same durable
+        transaction that persists a `LIVE_RESEARCH_RUN_EXECUTION` job's
+        terminal status (`_record_success`, `_schedule_retry_or_fail`'s
+        non-retryable branch, and `cancel_job`) - so a `COACH_RESEARCH_
+        RESUME` job for any Coach run waiting on it is created (or, on
+        duplicate delivery, reused) before that transaction commits.
+        Never enqueues to Celery itself (queue delivery happens after
+        commit, via `_enqueue_resume_job_after_commit`) and never creates
+        anything for a job type other than `LIVE_RESEARCH_RUN_EXECUTION`
+        or when no Coach run is actually waiting on this job."""
+        if job.job_type != BackgroundJobType.LIVE_RESEARCH_RUN_EXECUTION:
+            return None
+        coach_run = await uow.learning_orchestrator_runs.get_by_research_job_id(job.job_id)
+
+        if coach_run is None or coach_run.status != LearningOrchestratorRunStatus.WAITING_FOR_RESEARCH:
+            return None
+
+        idempotency_key = f"coach-research-resume:{coach_run.run_id}:{job.job_id}"
+        existing = await uow.background_jobs.get_by_idempotency_key(
+            job_type=BackgroundJobType.COACH_RESEARCH_RESUME, trigger_source=JobTriggerSource.SYSTEM.value,
+            requested_by_account_id=None, requested_by_integration_id=None, idempotency_key=idempotency_key,
+        )
+        if existing is not None:
+            return None  # already exists - the caller only enqueues a freshly-created job
+
+        entry = self._job_registry.get(BackgroundJobType.COACH_RESEARCH_RESUME)
+        parameters = CoachResearchResumeParameters(
+            coach_run_id=coach_run.run_id, coach_thread_id=coach_run.thread_id, research_job_id=job.job_id,
+        )
+        resume_job = BackgroundJob(
+            job_id=uuid4(), job_type=BackgroundJobType.COACH_RESEARCH_RESUME, status=BackgroundJobStatus.PENDING,
+            priority=BackgroundJobPriority.NORMAL, trigger_source=JobTriggerSource.SYSTEM,
+            idempotency_key=idempotency_key,
+            resource_key=coach_research_resume_resource_key(coach_run_id=coach_run.run_id),
+            parameters=parameters.model_dump(mode="json"), attempt_count=0, maximum_attempts=entry.maximum_attempts,
+            queue_name=entry.queue_name, task_name=entry.task_name, available_at=self._clock(),
+            job_version=_JOB_VERSION,
+        )
+        created = await uow.background_jobs.create(resume_job)
+        await uow.background_job_events.append(
+            BackgroundJobEvent(
+                job_id=created.job_id, event_type=JobEventType.CREATED,
+                message="Job created (Coach research resume).",
+            )
+        )
+        return created
+
+    async def _release_terminal_reservation_after_commit(self, job: BackgroundJob) -> None:
+        """Best-effort idempotent Redis cleanup after the terminal DB
+        transaction has committed. Redis availability can never change
+        the durable terminal job/resume-job outcome; the reservation TTL
+        remains the leak-recovery backstop."""
+        if (
+            job.job_type != BackgroundJobType.LIVE_RESEARCH_RUN_EXECUTION
+            or self._account_research_rate_limiter is None
+        ):
+            return
+        try:
+            async with self._unit_of_work_factory() as uow:
+                coach_run = await uow.learning_orchestrator_runs.get_by_research_job_id(job.job_id)
+            if coach_run is not None and coach_run.trusted_account_id is not None:
+                await self._account_research_rate_limiter.release(
+                    account_id=coach_run.trusted_account_id, reservation_id=str(coach_run.run_id)
+                )
+        except Exception:
+            _LOGGER.warning("Best-effort Live Research concurrency-slot release failed after DB commit.")
+
+    async def _enqueue_resume_job_after_commit(self, resume_job: BackgroundJob) -> None:
+        """Mirrors `create_job`'s own create-then-enqueue tail: queue
+        delivery failure here never loses the job - it stays durably
+        `PENDING`/un-queued and the reconciliation sweep (or an
+        administrative requeue) can recover it."""
+        try:
+            task_id = await self._job_queue.enqueue(
+                job_id=resume_job.job_id, job_type=resume_job.job_type, queue_name=resume_job.queue_name,
+                priority=resume_job.priority, available_at=resume_job.available_at,
+            )
+        except Exception as exc:  # noqa: BLE001 - queue delivery failures are infrastructure-shaped and varied
+            async with self._unit_of_work_factory() as uow:
+                await uow.background_jobs.mark_failed(
+                    resume_job.job_id, completed_at=self._clock(),
+                    result_summary=_sanitized_error_summary(exc, error_code="ENQUEUE_FAILED"),
+                )
+                await uow.background_job_events.append(
+                    BackgroundJobEvent(
+                        job_id=resume_job.job_id, event_type=JobEventType.FAILED,
+                        message="Enqueue failed; job preserved for administrative requeue.",
+                    )
+                )
+                await uow.commit()
+            return
+        async with self._unit_of_work_factory() as uow:
+            await uow.background_jobs.mark_queued(resume_job.job_id, task_id=task_id)
+            await uow.background_job_events.append(
+                BackgroundJobEvent(
+                    job_id=resume_job.job_id, event_type=JobEventType.QUEUED, message="Job queued for delivery.",
+                )
+            )
+            await uow.commit()
+
+    async def reconcile_waiting_coach_runs(self, *, batch_size: int = 100) -> int:
+        """Spec G2D2 section 13, extended by the G2D2/H1 correction pass
+        section 9: an idempotent backstop for the terminal-transaction
+        hook above. Finds Coach runs stuck `WAITING_FOR_RESEARCH` whose
+        linked `LIVE_RESEARCH_RUN_EXECUTION` job is already terminal, and
+        recovers exactly three failure shapes, in order:
+
+        1. No `COACH_RESEARCH_RESUME` job exists yet for this run/job
+           pair - creates one (via `_maybe_create_coach_resume_job`,
+           idempotency-key-guarded so this can never double-create).
+        2. A resume job exists and is `PENDING` (created, but the
+           process crashed or was killed before it ever reached the
+           queue) - enqueues it, unchanged, no new job row.
+        3. A resume job exists, is `FAILED`, and its `result_summary`
+           records `error_code == "ENQUEUE_FAILED"` (queue publication
+           itself failed, e.g. a transient Redis/Celery broker outage) -
+           requeues it via the existing `requeue_job` administrative
+           path. A `FAILED` resume job for any other reason (e.g. a
+           genuine `CoachResearchResumeOwnershipError`) is deliberately
+           left alone - only an enqueue failure is safely automatic to
+           retry.
+
+        A Redis lock (bounded batch, no wait) ensures only one sweep
+        runs at a time - a sweep that finds the lock already held is a
+        no-op, not an error, so this is safe to call repeatedly or on
+        any cadence (a scheduler, an admin CLI invocation, or a
+        health-check hook). Returns the total number of resume jobs
+        created, enqueued, or requeued by this call (0 on a healthy
+        system or when the lock could not be acquired).
+
+        Completed/cancelled Coach runs are never considered: `list_
+        waiting_for_research` only ever returns rows still in
+        `WAITING_FOR_RESEARCH`, so a run that already finished (by any
+        path) is structurally excluded, not filtered out here."""
+        try:
+            async with held_lock(
+                self._lock_port, key=reconcile_waiting_coach_runs_resource_key(), owner_id="reconciliation-sweep",
+                ttl_seconds=300, wait_timeout_seconds=0, metrics=self._metrics,
+            ):
+                resume_jobs_to_enqueue: list[BackgroundJob] = []
+                resume_job_ids_to_requeue: list[UUID] = []
+                async with self._unit_of_work_factory() as uow:
+                    waiting_runs = await uow.learning_orchestrator_runs.list_waiting_for_research(limit=batch_size)
+                    for run in waiting_runs:
+                        if run.research_job_id is None:
+                            continue
+                        job = await uow.background_jobs.get_by_id(run.research_job_id)
+                        if job is None or job.status not in TERMINAL_JOB_STATUSES:
+                            continue
+                        resume_job = await self._maybe_create_coach_resume_job(uow, job)
+                        if resume_job is not None:
+                            resume_jobs_to_enqueue.append(resume_job)
+                            continue
+
+                        # Scenario 2/3: `_maybe_create_coach_resume_job`
+                        # returned `None` because a resume job already
+                        # exists for this exact run/job pair - check
+                        # whether it's safely requeueable rather than
+                        # assuming it already reached the queue.
+                        idempotency_key = f"coach-research-resume:{run.run_id}:{job.job_id}"
+                        existing_resume_job = await uow.background_jobs.get_by_idempotency_key(
+                            job_type=BackgroundJobType.COACH_RESEARCH_RESUME,
+                            trigger_source=JobTriggerSource.SYSTEM.value, requested_by_account_id=None,
+                            requested_by_integration_id=None, idempotency_key=idempotency_key,
+                        )
+                        if existing_resume_job is None:
+                            continue
+                        if existing_resume_job.status == BackgroundJobStatus.PENDING:
+                            resume_jobs_to_enqueue.append(existing_resume_job)
+                        elif (
+                            existing_resume_job.status == BackgroundJobStatus.FAILED
+                            and (existing_resume_job.result_summary or {}).get("error_code") == "ENQUEUE_FAILED"
+                        ):
+                            resume_job_ids_to_requeue.append(existing_resume_job.job_id)
+                    await uow.commit()
+                for resume_job in resume_jobs_to_enqueue:
+                    await self._enqueue_resume_job_after_commit(resume_job)
+                for resume_job_id in resume_job_ids_to_requeue:
+                    await self.requeue_job(resume_job_id)
+                return len(resume_jobs_to_enqueue) + len(resume_job_ids_to_requeue)
+        except LockAcquisitionError:
+            return 0
+
+    async def expire_stale_waiting_for_research_runs(self, *, batch_size: int = 100) -> int:
+        """Spec G2D2/H1 correction pass, section 9, scenario 4: a Coach
+        run stuck `WAITING_FOR_RESEARCH` past its own `research_deadline_
+        at` (set by `request_live_research` when the job was created) is
+        marked `EXPIRED` - a terminal, safe status distinct from
+        `SUCCEEDED`/`FAILED`/`CANCELLED` - so it is never retried
+        indefinitely and never receives a duplicate graph resume once
+        marked. Mirrors `SYSTEM_MAINTENANCE`'s own `expire_stale_running_
+        jobs` precedent: a distinct Redis lock, bounded batch, idempotent
+        (a run marked `EXPIRED` no longer matches `WAITING_FOR_RESEARCH`,
+        so a repeat sweep simply finds nothing left to do). Returns the
+        number of runs expired by this call."""
+        try:
+            async with held_lock(
+                self._lock_port, key=expire_stale_waiting_for_research_resource_key(),
+                owner_id="expire-stale-waiting-for-research", ttl_seconds=300, wait_timeout_seconds=0,
+                metrics=self._metrics,
+            ):
+                now = self._clock()
+                expired_count = 0
+                async with self._unit_of_work_factory() as uow:
+                    stale_runs = await uow.learning_orchestrator_runs.list_waiting_for_research_past_deadline(
+                        now=now, limit=batch_size,
+                    )
+                    for run in stale_runs:
+                        await uow.learning_orchestrator_runs.mark_expired(run.run_id, completed_at=now)
+                        expired_count += 1
+                    await uow.commit()
+                return expired_count
+        except LockAcquisitionError:
+            return 0
+
     async def _record_success(
         self, *, job_id: UUID, attempt: BackgroundJobAttempt, entry: JobRegistryEntry, outcome: Any
     ) -> JobExecutionResult:
@@ -383,10 +621,14 @@ class BackgroundJobService:
                     message="Job succeeded.",
                 )
             )
+            resume_job = await self._maybe_create_coach_resume_job(uow, job)
             await uow.commit()
+        await self._release_terminal_reservation_after_commit(job)
         self._metrics.increment_counter(
             "finquest_jobs_completed_total", labels={"job_type": entry.job_type.value, "queue": entry.queue_name}
         )
+        if resume_job is not None:
+            await self._enqueue_resume_job_after_commit(resume_job)
         return JobExecutionResult(
             job_id=job_id, status=job.status, result_summary=job.result_summary or {}, warnings=outcome.warnings
         )
@@ -452,10 +694,14 @@ class BackgroundJobService:
                         message=f"Attempt {attempt_number} failed non-retryably ({error_code}).",
                     )
                 )
+                resume_job = await self._maybe_create_coach_resume_job(uow, job)
                 await uow.commit()
+                await self._release_terminal_reservation_after_commit(job)
                 self._metrics.increment_counter(
                     "finquest_jobs_failed_total", labels={"job_type": entry.job_type.value, "queue": entry.queue_name}
                 )
+                if resume_job is not None:
+                    await self._enqueue_resume_job_after_commit(resume_job)
 
         return JobExecutionResult(job_id=job_id, status=job.status, result_summary=job.result_summary or {}, warnings=[])
 
@@ -499,7 +745,11 @@ class BackgroundJobService:
                     message="Job cancelled by administrator. Cancellation of already-running work is cooperative.",
                 )
             )
+            resume_job = await self._maybe_create_coach_resume_job(uow, cancelled)
             await uow.commit()
+        await self._release_terminal_reservation_after_commit(cancelled)
+        if resume_job is not None:
+            await self._enqueue_resume_job_after_commit(resume_job)
         return cancelled
 
     async def requeue_job(self, job_id: UUID) -> BackgroundJob:

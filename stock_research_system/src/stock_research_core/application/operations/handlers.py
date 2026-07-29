@@ -22,6 +22,9 @@ from stock_research_core.application.ai_tutor.knowledge_ingestion import Knowled
 from stock_research_core.application.ai_tutor.models import TutorContext
 from stock_research_core.application.ai_tutor.ports import KnowledgeRetrieverPort, TutorGuardrailPort
 from stock_research_core.application.exceptions import (
+    CoachResearchResumeInconsistentJobError,
+    CoachResearchResumeOwnershipError,
+    CoachResearchResumeStateConflictError,
     DuplicateEvidenceError,
     LanguageServiceError,
     LiveResearchJobProviderNotConfiguredError,
@@ -38,6 +41,7 @@ from stock_research_core.application.exceptions import (
 from stock_research_core.application.language.enums import DetectedLanguage
 from stock_research_core.application.language.ports import LanguageServicePort
 from stock_research_core.application.language.unavailable_language_service import UnavailableLanguageService
+from stock_research_core.application.learning_orchestrator.service import PersonalizedLearningOrchestratorService
 from stock_research_core.application.live_research.provider_evidence_mapping import (
     discovery_candidate_to_evidence_kwargs,
     sec_company_facts_candidate_to_evidence_kwargs,
@@ -55,8 +59,13 @@ from stock_research_core.application.live_research.provider_ports import (
     OfficialCompanyDataProviderPort,
 )
 from stock_research_core.application.live_research.service import ResearchRequestService
+from stock_research_core.application.live_research.terminal_outcome import (
+    LiveResearchTerminalOutcome,
+    interpret_live_research_terminal_job,
+)
 from stock_research_core.application.market_data.service import MarketDataIngestionService
 from stock_research_core.application.operations.models import (
+    CoachResearchResumeParameters,
     CurriculumKnowledgeRefreshParameters,
     KnowledgeGapSummaryParameters,
     KnowledgeReembedParameters,
@@ -90,8 +99,10 @@ from stock_research_core.domain.ai_tutor.enums import (
     TutorMessageRole,
 )
 from stock_research_core.domain.ai_tutor.models import TutorMessage
+from stock_research_core.domain.learning_orchestrator.enums import LearningOrchestratorRunStatus
 from stock_research_core.domain.live_research.enums import FailureCategory, ResearchRunStatus, ResearchScope
 from stock_research_core.domain.models import Security, utc_now
+from stock_research_core.domain.operations.enums import TERMINAL_JOB_STATUSES, BackgroundJobType
 from stock_research_core.domain.operations.sanitization import redact
 from stock_research_core.domain.virtual_portfolio.enums import PortfolioValuationRunStatus
 
@@ -1141,3 +1152,155 @@ class LiveResearchRunExecutionJobHandler:
                 duplicates_skipped += 1
 
         return evidence_recorded, duplicates_skipped, providers_called, provider_request_ids, candidates_received
+
+
+class CoachResearchResumeJobHandler:
+    """Spec G2D2 section 16: resumes a Coach run paused `WAITING_FOR_
+    RESEARCH` once its linked `LIVE_RESEARCH_RUN_EXECUTION` job reaches a
+    terminal status. Internal-only - `COACH_RESEARCH_RESUME`'s registry
+    entry allows only the `SYSTEM` trigger source (see `job_registry.py`),
+    so this handler is only ever reached via the terminal-transaction
+    hook (`BackgroundJobService._maybe_create_coach_resume_job`) or the
+    reconciliation sweep, never a learner/API/n8n request.
+
+    Verification order (exactly as spec'd):
+    1. Load the Coach run; require matching thread id and
+       `research_job_id`; an already-resumed run (status has moved past
+       `WAITING_FOR_RESEARCH` but `research_job_id` still matches) is an
+       idempotent no-op, not an error.
+    2. Load the `BackgroundJob`; require `LIVE_RESEARCH_RUN_EXECUTION`,
+       terminal, and `requested_by_account_id` matching the run's own
+       `trusted_account_id`.
+    3. Interpret the terminal job via `interpret_live_research_terminal_job`
+       (spec section 15's truth table) - `INCONSISTENT` fails closed.
+    4. For `EVIDENCE_FOUND`: load and verify the `ResearchRun` (COMPLETED,
+       `request_id` matches) and `ResearchRequest` (account ownership)
+       from PostgreSQL - the `BackgroundJob.result_summary` is never
+       trusted as the lifecycle source of truth, only as a pointer to
+       verify.
+    5. Persist the outcome on the Coach run, then resume the graph via
+       `PersonalizedLearningOrchestratorService.resume_from_research`
+       with outcome metadata only - never raw `EvidenceItem`s. The
+       resumed graph node reloads verified evidence from PostgreSQL
+       itself.
+    """
+
+    def __init__(
+        self, *, unit_of_work_factory: Callable[[], UnitOfWorkPort],
+        learning_orchestrator_service: PersonalizedLearningOrchestratorService,
+    ) -> None:
+        self._unit_of_work_factory = unit_of_work_factory
+        self._learning_orchestrator_service = learning_orchestrator_service
+
+    async def handle(
+        self, *, context: JobExecutionContext, parameters: CoachResearchResumeParameters, progress: ProgressReporterPort
+    ) -> HandlerOutcome:
+        async with self._unit_of_work_factory() as uow:
+            run = await uow.learning_orchestrator_runs.get_by_id(parameters.coach_run_id)
+            if run is None:
+                raise CoachResearchResumeStateConflictError(
+                    f"No Coach run found with id '{parameters.coach_run_id}'."
+                )
+            if run.thread_id != parameters.coach_thread_id:
+                raise CoachResearchResumeStateConflictError(
+                    "COACH_RESEARCH_RESUME thread_id does not match the Coach run's own thread_id."
+                )
+
+            if run.status != LearningOrchestratorRunStatus.WAITING_FOR_RESEARCH:
+                if run.research_job_id == parameters.research_job_id:
+                    # A previous delivery (terminal-transaction hook or
+                    # reconciliation sweep) already resumed this exact
+                    # run/job pair - safe, idempotent no-op.
+                    return HandlerOutcome(
+                        result_summary={
+                            "coach_run_id": str(run.run_id), "outcome": "ALREADY_RESUMED",
+                            "final_status": run.status.value,
+                        }
+                    )
+                raise CoachResearchResumeStateConflictError(
+                    f"Coach run '{run.run_id}' is {run.status.value}, not WAITING_FOR_RESEARCH, and its "
+                    "research_job_id does not match this resume job - refusing to resume."
+                )
+            if run.research_job_id != parameters.research_job_id:
+                raise CoachResearchResumeStateConflictError(
+                    "COACH_RESEARCH_RESUME research_job_id does not match the Coach run's own research_job_id."
+                )
+
+            job = await uow.background_jobs.get_by_id(parameters.research_job_id)
+            if job is None or job.job_type != BackgroundJobType.LIVE_RESEARCH_RUN_EXECUTION:
+                raise CoachResearchResumeInconsistentJobError(
+                    f"'{parameters.research_job_id}' is not a LIVE_RESEARCH_RUN_EXECUTION job."
+                )
+            if job.status not in TERMINAL_JOB_STATUSES:
+                raise CoachResearchResumeInconsistentJobError(
+                    f"Live Research job '{job.job_id}' is {job.status.value}, not terminal."
+                )
+            if job.requested_by_account_id is None or job.requested_by_account_id != run.trusted_account_id:
+                raise CoachResearchResumeOwnershipError(
+                    "The Live Research job's requested_by_account_id does not match the Coach run's "
+                    "trusted_account_id."
+                )
+
+            interpretation = interpret_live_research_terminal_job(job)
+
+            if interpretation.outcome == LiveResearchTerminalOutcome.EVIDENCE_FOUND:
+                research_run = await uow.research_runs.get(interpretation.research_run_id)
+                if (
+                    research_run is None
+                    or research_run.status != ResearchRunStatus.COMPLETED
+                    or research_run.request_id != interpretation.research_request_id
+                ):
+                    raise CoachResearchResumeInconsistentJobError(
+                        "The Live Research job's result_summary points to a ResearchRun that does not exist, "
+                        "is not COMPLETED, or does not belong to the referenced ResearchRequest."
+                    )
+                research_request = await uow.research_requests.get(interpretation.research_request_id)
+                if research_request is None or research_request.requested_by_account_id != run.trusted_account_id:
+                    raise CoachResearchResumeOwnershipError(
+                        "The verified ResearchRequest's requested_by_account_id does not match the Coach "
+                        "run's trusted_account_id."
+                    )
+                await uow.learning_orchestrator_runs.set_research_outcome(
+                    run.run_id, research_request_id=interpretation.research_request_id,
+                    research_run_id=interpretation.research_run_id, research_failure_category=None,
+                    evidence_count=interpretation.evidence_count,
+                )
+                resume_value = {
+                    "outcome": "EVIDENCE_FOUND", "research_run_id": str(interpretation.research_run_id),
+                    "evidence_count": interpretation.evidence_count,
+                }
+            elif interpretation.outcome == LiveResearchTerminalOutcome.NO_EVIDENCE_FOUND:
+                await uow.learning_orchestrator_runs.set_research_outcome(
+                    run.run_id, research_request_id=None, research_run_id=None,
+                    research_failure_category="NO_EVIDENCE_FOUND", evidence_count=0,
+                )
+                resume_value = {"outcome": "NO_EVIDENCE_FOUND", "evidence_count": 0}
+            elif interpretation.outcome == LiveResearchTerminalOutcome.PROVIDER_OR_INFRASTRUCTURE_FAILURE:
+                await uow.learning_orchestrator_runs.set_research_outcome(
+                    run.run_id, research_request_id=None, research_run_id=None,
+                    research_failure_category="PROVIDER_FAILURE", evidence_count=None,
+                )
+                resume_value = {"outcome": "PROVIDER_FAILURE"}
+            elif interpretation.outcome == LiveResearchTerminalOutcome.CANCELLED_OR_SKIPPED:
+                await uow.learning_orchestrator_runs.set_research_outcome(
+                    run.run_id, research_request_id=None, research_run_id=None,
+                    research_failure_category="CANCELLED", evidence_count=None,
+                )
+                resume_value = {"outcome": "CANCELLED"}
+            else:
+                raise CoachResearchResumeInconsistentJobError(
+                    f"Live Research job '{job.job_id}' terminated in an inconsistent, unverifiable state."
+                )
+
+            await uow.commit()
+
+        await progress.report(current=1, total=1, message="Resuming the Coach run.")
+        updated_run = await self._learning_orchestrator_service.resume_from_research(
+            run_id=run.run_id, resume_value=resume_value
+        )
+        return HandlerOutcome(
+            result_summary={
+                "coach_run_id": str(run.run_id), "outcome": resume_value["outcome"],
+                "final_status": updated_run.status.value,
+            }
+        )

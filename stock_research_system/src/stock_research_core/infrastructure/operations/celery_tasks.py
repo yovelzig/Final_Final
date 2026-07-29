@@ -30,9 +30,21 @@ from stock_research_core.application.operations.job_registry import BackgroundJo
 from stock_research_core.application.operations.service import BackgroundJobService
 from stock_research_core.domain.operations.enums import BackgroundJobType
 from stock_research_core.infrastructure.ai_tutor.config import EmbeddingSettings, TutorModelSettings
+from stock_research_core.application.learning_orchestrator.nodes import LiveResearchTriggerDependencies
+from stock_research_core.application.operations.job_registry import BackgroundJobRegistry
+from stock_research_core.application.operations.service import BackgroundJobService
+from stock_research_core.domain.operations.enums import BackgroundJobType
+from stock_research_core.infrastructure.ai_tutor.config import (
+    EmbeddingSettings,
+    HebrewQueryBridgeSettings,
+    KnowledgeSufficiencySettings,
+    OpenAIReasoningSettings,
+    TutorModelSettings,
+)
 from stock_research_core.infrastructure.ai_tutor.deterministic_fake_embeddings import (
     DeterministicFakeEmbeddingAdapter,
 )
+from stock_research_core.infrastructure.ai_tutor.model_factory import build_knowledge_sufficiency_gate, build_tutor_model
 from stock_research_core.infrastructure.ai_tutor.production_safety import (
     assert_embedding_provider_production_safe,
 )
@@ -44,6 +56,22 @@ from stock_research_core.infrastructure.database.engine import create_database_e
 from stock_research_core.infrastructure.database.unit_of_work import SqlAlchemyUnitOfWork
 from stock_research_core.infrastructure.language.composition import build_language_service, close_language_service
 from stock_research_core.infrastructure.language.config import LanguageServiceSettings
+from stock_research_core.infrastructure.learning_orchestrator.config import LangGraphSettings
+from stock_research_core.infrastructure.learning_orchestrator.runtime_factory import build_learning_orchestrator_runtime
+from stock_research_core.infrastructure.live_research.config import (
+    LiveResearchAccountLimitSettings,
+    PerplexitySearchSettings,
+    ResearchModelSettings,
+    SecEdgarSettings,
+)
+from stock_research_core.infrastructure.live_research.redis_account_rate_limiter import RedisAccountResearchLimiter
+from stock_research_core.infrastructure.live_research.research_model_factory import (
+    build_research_model,
+    close_research_model,
+)
+from stock_research_core.infrastructure.live_research.sec_company_ticker_resolver import (
+    SecCompanyTickerResolver,
+)
 from stock_research_core.infrastructure.operations.celery_app import celery_app
 from stock_research_core.infrastructure.operations.celery_queue import CeleryJobQueue
 from stock_research_core.infrastructure.operations.config import OperationsSettings
@@ -75,6 +103,7 @@ _TIME_LIMITS: dict[BackgroundJobType, int] = {
     BackgroundJobType.LEARNING_QUALITY_AGGREGATION: 900,
     BackgroundJobType.QUALITY_BASELINE_COMPARISON: 300,
     BackgroundJobType.LIVE_RESEARCH_RUN_EXECUTION: 180,
+    BackgroundJobType.COACH_RESEARCH_RESUME: 120,
 }
 
 
@@ -91,6 +120,17 @@ class WorkerContext:
     #: registry) has one. `build_operations_registry` receives this
     #: exact instance too, never a second one.
     language_service: LanguageServicePort
+    #: Only set on `finquest-worker-coach` (spec G2D2 section 14) -
+    #: `None`-safe to close on `worker_process_shutdown`.
+    learning_orchestrator_checkpointer_pool: Any | None = None
+    #: Only set on `finquest-worker-coach` when SEC EDGAR is enabled
+    #: (spec G2D2/H1 correction pass, section 5) - `None`-safe to close
+    #: on `worker_process_shutdown`.
+    cik_resolver: Any | None = None
+    #: Only set on `finquest-worker-coach` when Ollama is configured
+    #: (spec G2D2/H1 correction pass, section 6) - `None`-safe to close
+    #: on `worker_process_shutdown`.
+    research_model_router: Any | None = None
 
 
 _worker_context: WorkerContext | None = None
@@ -104,27 +144,13 @@ def _build_worker_context(
     language_service_settings: LanguageServiceSettings | None = None,
     tutor_model_settings: TutorModelSettings | None = None,
 ) -> WorkerContext:
-    """The worker-process composition root. Every settings parameter is
-    optional and defaults to reading the real environment/`.env` file
-    (exactly what `worker_process_init` relies on) - the explicit
-    overrides exist so a unit test can build a fully hermetic
-    `WorkerContext` (`test_worker_language_composition.py`) without any
-    ambient `.env`/environment-variable leakage, mirroring
-    `api.app_factory.create_app`'s own settings-override pattern.
-    """
+    """Build a hermetic-capable worker context for all job and Coach worker types."""
     database_settings = database_settings or DatabaseSettings()
     embedding_settings = embedding_settings or EmbeddingSettings()
     operations_settings = operations_settings or OperationsSettings()
-    # Phase G2E2A: loaded (env vars only - no network call) so
-    # LIVE_RESEARCH_RUN_EXECUTION, executed here in the worker, gets the
-    # *same configured* language service the API process would build -
-    # not the safe `UnavailableLanguageService` default it silently fell
-    # back to before this correction pass. `tutor_model_settings` is
-    # loaded too, purely so a translation-capable provider can reuse the
-    # Tutor's own already-configured credentials instead of requiring a
-    # second copy (see `infrastructure.language.composition`).
     language_service_settings = language_service_settings or LanguageServiceSettings()
     tutor_model_settings = tutor_model_settings or TutorModelSettings()
+    learning_orchestrator_settings = LangGraphSettings()
 
     assert_embedding_provider_production_safe(
         embedding_settings=embedding_settings, operations_settings=operations_settings
@@ -161,19 +187,113 @@ def _build_worker_context(
     redis_client = build_redis_client(operations_settings.redis_url)
     lock_port = RedisDistributedLock(redis_client)
     job_queue = CeleryJobQueue(celery_app)
+    # Spec G2D2/H1 correction pass, section 8: constructed for every
+    # worker (not only finquest-worker-coach) - this is what
+    # `BackgroundJobService._maybe_create_coach_resume_job` releases the
+    # per-account concurrency slot through once a Coach-triggered
+    # LIVE_RESEARCH_RUN_EXECUTION job (executed on finquest-worker-research)
+    # goes terminal. Cheap/connection-less to construct; a no-op for every
+    # worker that never touches that job type.
+    live_research_account_limit_settings = LiveResearchAccountLimitSettings()
+    account_research_rate_limiter = RedisAccountResearchLimiter(
+        redis_client=redis_client,
+        concurrent_limit=live_research_account_limit_settings.live_research_per_account_concurrent_limit,
+        hourly_limit=live_research_account_limit_settings.live_research_per_account_hourly_limit,
+        concurrent_window_seconds=LiveResearchTriggerDependencies.research_deadline_seconds,
+    )
     metrics = PrometheusMetrics() if operations_settings.metrics_enabled else NoOpMetrics()
     tracing = build_tracing(
         enabled=operations_settings.otel_enabled, service_name="finquest-worker",
         otlp_endpoint=operations_settings.otel_exporter_otlp_endpoint, sample_ratio=operations_settings.otel_sample_ratio,
     )
 
+    # Spec G2D2 section 14: only `finquest-worker-coach` (the one
+    # process with `LANGGRAPH_COACH_WORKER_ENABLED=true`) opens a
+    # checkpointer pool and compiles the Coach graph - every other
+    # worker sharing this same composition root gets
+    # `learning_orchestrator_service=None`, exactly like the API
+    # process does when `LANGGRAPH_ENABLED=false`.
+    learning_orchestrator_service = None
+    checkpointer_pool = None
+    cik_resolver = None
+    research_model_router = None
+    if learning_orchestrator_settings.langgraph_coach_worker_enabled:
+        tutor_model = build_tutor_model(TutorModelSettings(), openai_reasoning_settings=OpenAIReasoningSettings())
+        knowledge_sufficiency_gate = build_knowledge_sufficiency_gate(KnowledgeSufficiencySettings())
+
+        # Spec G2D2 section 5/11/18: a trigger-only `BackgroundJobService`
+        # built from a registry that does *not* register the coach-resume
+        # handler - only used for `create_job(LIVE_RESEARCH_RUN_EXECUTION)`
+        # calls from inside the graph, never for `execute_job`. This
+        # sidesteps the circular dependency where the *execution* registry
+        # below needs `learning_orchestrator_service`, which itself needs
+        # a `BackgroundJobService` to trigger Live Research jobs.
+        live_research_perplexity_settings = PerplexitySearchSettings()
+        live_research_sec_settings = SecEdgarSettings()
+        live_research_route_enabled = (
+            learning_orchestrator_settings.langgraph_enabled
+            and learning_orchestrator_settings.langgraph_live_research_route_enabled
+            and operations_settings.live_research_jobs_enabled
+            and (
+                live_research_perplexity_settings.live_research_perplexity_enabled
+                or live_research_sec_settings.live_research_sec_enabled
+            )
+        )
+        live_research_trigger_registry = build_operations_registry(
+            unit_of_work_factory=uow_factory, embedding_provider=embedding_provider, chunker=chunker,
+        )
+        live_research_trigger_service = BackgroundJobService(
+            unit_of_work_factory=uow_factory, job_registry=live_research_trigger_registry, job_queue=job_queue,
+            lock_port=lock_port, metrics=metrics, tracing=tracing,
+        )
+        # Spec G2D2/H1 correction pass, section 5: constructed only when
+        # SEC EDGAR itself is enabled - never fabricates a CIK when SEC is
+        # disabled.
+        cik_resolver = (
+            SecCompanyTickerResolver(user_agent=live_research_sec_settings.live_research_sec_user_agent)
+            if live_research_sec_settings.live_research_sec_enabled
+            else None
+        )
+        live_research_deps = LiveResearchTriggerDependencies(
+            background_job_service=live_research_trigger_service,
+            account_rate_limiter=account_research_rate_limiter,
+            enabled=live_research_route_enabled,
+            max_question_characters=live_research_account_limit_settings.live_research_max_question_characters,
+            cik_resolver=cik_resolver,
+        )
+
+        # Spec G2D2/H1 correction pass, section 6: `None` when Ollama is
+        # unconfigured - `synthesize_research_response` then takes the
+        # bounded provider-unavailable path, never a model call.
+        research_model_router = build_research_model(ResearchModelSettings())
+        composition = asyncio.run(
+            build_learning_orchestrator_runtime(
+                settings=learning_orchestrator_settings, database_url=database_settings.database_url,
+                unit_of_work_factory=uow_factory, embedding_provider=embedding_provider, tutor_model=tutor_model,
+                knowledge_sufficiency_gate=knowledge_sufficiency_gate, lock_port=lock_port, metrics=metrics,
+                tracing=tracing, language_service=language_service,
+                language_service_enabled=language_service_settings.hebrew_query_bridge_enabled,
+                live_research=live_research_deps, research_model_router=research_model_router,
+            )
+        )
+        learning_orchestrator_service = composition.service
+        checkpointer_pool = composition.checkpointer_pool
+
+    registry = build_operations_registry(
+        unit_of_work_factory=uow_factory, embedding_provider=embedding_provider, chunker=chunker,
+        learning_orchestrator_service=learning_orchestrator_service,
+        language_service=language_service,
+        language_service_enabled=language_service_settings.hebrew_query_bridge_enabled,
+    )
+
     service = BackgroundJobService(
         unit_of_work_factory=uow_factory, job_registry=registry, job_queue=job_queue, lock_port=lock_port,
-        metrics=metrics, tracing=tracing,
+        metrics=metrics, tracing=tracing, account_research_rate_limiter=account_research_rate_limiter,
     )
     return WorkerContext(
         engine=engine, redis_client=redis_client, service=service, registry=registry,
-        language_service=language_service,
+        learning_orchestrator_checkpointer_pool=checkpointer_pool, cik_resolver=cik_resolver,
+        research_model_router=research_model_router, language_service=language_service,
     )
 
 
@@ -191,16 +311,17 @@ def _init_worker_process(**_kwargs: Any) -> None:
 
 @worker_process_shutdown.connect
 def _shutdown_worker_process(**_kwargs: Any) -> None:
-    """Closes an owned `LlmBackedLanguageService` HTTP client on worker
-    shutdown, mirroring the API process's `create_app` lifespan
-    `finally:` block. A safe no-op when no worker context was ever built
-    (e.g. the process is shutting down before `worker_process_init` ever
-    ran), or when the configured language service owns no client
-    (`UnavailableLanguageService`, the default)."""
+    """Close every process-owned client exactly once."""
     global _worker_context
     if _worker_context is None:
         return
     asyncio.run(close_language_service(_worker_context.language_service))
+    if _worker_context.learning_orchestrator_checkpointer_pool is not None:
+        asyncio.run(_worker_context.learning_orchestrator_checkpointer_pool.close())
+    if _worker_context.cik_resolver is not None:
+        asyncio.run(_worker_context.cik_resolver.aclose())
+    if _worker_context.research_model_router is not None:
+        asyncio.run(close_research_model(_worker_context.research_model_router))
     _worker_context = None
 
 
@@ -260,3 +381,4 @@ ragas_quality_evaluation_task = _make_task(BackgroundJobType.RAGAS_QUALITY_EVALU
 learning_quality_aggregation_task = _make_task(BackgroundJobType.LEARNING_QUALITY_AGGREGATION)
 quality_baseline_comparison_task = _make_task(BackgroundJobType.QUALITY_BASELINE_COMPARISON)
 live_research_run_execution_task = _make_task(BackgroundJobType.LIVE_RESEARCH_RUN_EXECUTION)
+coach_research_resume_task = _make_task(BackgroundJobType.COACH_RESEARCH_RESUME)

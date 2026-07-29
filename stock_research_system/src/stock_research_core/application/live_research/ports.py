@@ -12,6 +12,10 @@ from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
+from stock_research_core.application.live_research.synthesis_models import (
+    ResearchSynthesisRequest,
+    ResearchSynthesisResult,
+)
 from stock_research_core.domain.live_research.enums import ClaimStatus, EvidenceStance, FailureCategory
 from stock_research_core.domain.live_research.models import (
     ClaimEvidenceLink,
@@ -106,6 +110,16 @@ class ResearchClaimRepositoryPort(Protocol):
     async def update_status(
         self, claim_id: UUID, status: ClaimStatus, *, confidence_score: float | None = None
     ) -> ResearchClaim: ...
+
+
+class ResearchModelPort(Protocol):
+    """Generates a grounded research synthesis answer from a fully-built
+    `ResearchSynthesisRequest` (spec G2D2/H1 correction pass, section 6).
+    Deliberately a distinct Protocol from `ai_tutor.ports.TutorModelPort`
+    - never interchangeable, even though a concrete adapter may call the
+    same underlying Ollama/OpenAI endpoint."""
+
+    async def generate(self, request: ResearchSynthesisRequest) -> ResearchSynthesisResult: ...
 
 
 class ClaimEvidenceLinkRepositoryPort(Protocol):

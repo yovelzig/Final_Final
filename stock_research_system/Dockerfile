@@ -28,7 +28,12 @@ COPY src ./src
 COPY migrations ./migrations
 COPY alembic.ini ./alembic.ini
 
-RUN pip install --no-cache-dir .
+# `.[openai]` installs only the `openai` SDK client (not the heavier
+# `quality_evaluation`/ragas group) - required by
+# infrastructure/ai_tutor/openai_reasoning_tutor.py (OPENAI_REASONING_ENABLED,
+# defaults false) and the Live Research grounded synthesis router, both of
+# which finquest-api and finquest-worker-coach need to be able to construct.
+RUN pip install --no-cache-dir ".[openai]"
 
 COPY scripts ./scripts
 

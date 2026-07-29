@@ -99,6 +99,38 @@ def test_off_topic_question_falls_back() -> None:
     assert decision.safe_response_override == EXACT_INSUFFICIENT_EVIDENCE_FALLBACK
 
 
+def test_hebrew_finance_question_is_not_off_topic() -> None:
+    """Spec G2D2 section 6: a legitimate Hebrew finance question must
+    reach ALLOW (and therefore classification/retrieval), not be
+    misclassified as off-topic purely because the off-topic check
+    historically only recognized English tokens."""
+    guardrail = RuleBasedTutorGuardrail()
+    decision = guardrail.evaluate_input(
+        conversation_id=uuid4(), message=_message("מה זה גיוון תיק השקעות?"), context=_general_context(),
+    )
+    assert decision.action == TutorGuardrailAction.ALLOW
+
+
+def test_hebrew_mixed_with_english_ticker_is_not_off_topic() -> None:
+    guardrail = RuleBasedTutorGuardrail()
+    decision = guardrail.evaluate_input(
+        conversation_id=uuid4(), message=_message("מה קרה למניית NVDA השבוע?"), context=_general_context(),
+    )
+    assert decision.action == TutorGuardrailAction.ALLOW
+
+
+def test_unrelated_hebrew_question_still_falls_back() -> None:
+    """Widening the off-topic check to recognize Hebrew finance
+    vocabulary must not make every Hebrew question pass - unrelated
+    Hebrew text is still off-topic, exactly like unrelated English text."""
+    guardrail = RuleBasedTutorGuardrail()
+    decision = guardrail.evaluate_input(
+        conversation_id=uuid4(), message=_message("מה המתכון לפסטה קרבונרה?"), context=_general_context(),
+    )
+    assert decision.action == TutorGuardrailAction.FALLBACK
+    assert decision.request_category == TutorRequestCategory.UNSUPPORTED_TOPIC
+
+
 def test_refuse_and_fallback_always_carry_english_override() -> None:
     guardrail = RuleBasedTutorGuardrail()
     for question in ("Should I buy NVDA?", "How can I guarantee 20%?"):

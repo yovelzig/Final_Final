@@ -135,11 +135,22 @@ class FakeEventRepo:
         return [e for e in self.events if e.job_id == job_id]
 
 
+class _FakeLearningOrchestratorRunRepoNoCoachRun:
+    """No Coach run is ever waiting on a job in these tests - a minimal
+    stand-in so `BackgroundJobService._maybe_create_coach_resume_job`'s
+    lookup has something to call without needing the full Coach fixture
+    stack these tests otherwise have no reason to depend on."""
+
+    async def get_by_research_job_id(self, research_job_id):
+        return None
+
+
 class FakeUow:
     def __init__(self, job_repo, attempt_repo, event_repo) -> None:
         self.background_jobs = job_repo
         self.background_job_attempts = attempt_repo
         self.background_job_events = event_repo
+        self.learning_orchestrator_runs = _FakeLearningOrchestratorRunRepoNoCoachRun()
 
     async def __aenter__(self):
         return self

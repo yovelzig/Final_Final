@@ -107,6 +107,17 @@ class LearningOrchestratorRun(DomainModel):
     run_id: UUID = Field(default_factory=uuid4)
     thread_id: UUID
     learner_id: UUID
+    #: The caller's own `AuthenticatedPrincipal.account_id` at run
+    #: creation (spec G2D2 section 9) - used as `BackgroundJob.
+    #: requested_by_account_id` for any Live Research job this run
+    #: triggers, and as the ownership check `COACH_RESEARCH_RESUME`
+    #: verifies against. Never derived from `user_input`, resume
+    #: payloads, or model output. Optional only to represent legacy rows
+    #: a production backfill (migration 0013) could not resolve through
+    #: the authoritative account relationship; every *new* run is still
+    #: required to supply one at the service boundary
+    #: (`LearningOrchestratorService.start_run`/`stream_start_run`).
+    trusted_account_id: UUID | None = None
 
     status: LearningOrchestratorRunStatus = LearningOrchestratorRunStatus.CREATED
 
@@ -129,6 +140,18 @@ class LearningOrchestratorRun(DomainModel):
 
     failure_code: str | None = Field(default=None, max_length=100)
     failure_message: str | None = Field(default=None, max_length=1000)
+
+    #: Coach-to-Live-Research correlation (spec G2D2 sections 11-12).
+    #: `research_request_id`/`research_run_id` remain `None` until the
+    #: terminal `COACH_RESEARCH_RESUME` verification has loaded and
+    #: confirmed the corresponding `ResearchRun`/`ResearchRequest` rows -
+    #: only `research_job_id` is known while `WAITING_FOR_RESEARCH`.
+    research_job_id: UUID | None = None
+    research_request_id: UUID | None = None
+    research_run_id: UUID | None = None
+    research_deadline_at: datetime | None = None
+    research_failure_category: str | None = Field(default=None, max_length=100)
+    evidence_count: int | None = Field(default=None, ge=0)
 
     graph_version: str = Field(min_length=1, max_length=50)
     created_at: datetime = Field(default_factory=utc_now)
@@ -157,6 +180,11 @@ class LearningOrchestratorRun(DomainModel):
             raise ValueError("a RUNNING run requires started_at")
         if self.status == LearningOrchestratorRunStatus.WAITING_FOR_LEARNER and self.waiting_at is None:
             raise ValueError("a WAITING_FOR_LEARNER run requires waiting_at")
+        if self.status == LearningOrchestratorRunStatus.WAITING_FOR_RESEARCH:
+            if self.waiting_at is None:
+                raise ValueError("a WAITING_FOR_RESEARCH run requires waiting_at")
+            if self.research_job_id is None:
+                raise ValueError("a WAITING_FOR_RESEARCH run requires research_job_id")
         if self.status == LearningOrchestratorRunStatus.SUCCEEDED and self.completed_at is None:
             raise ValueError("a SUCCEEDED run requires completed_at")
         if self.status == LearningOrchestratorRunStatus.CANCELLED and self.cancelled_at is None:

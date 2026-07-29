@@ -39,11 +39,15 @@ def learning_orchestrator_run_orm_to_domain(row: LearningOrchestratorRunORM) -> 
     try:
         return LearningOrchestratorRun(
             run_id=row.run_id, thread_id=row.thread_id, learner_id=row.learner_id,
+            trusted_account_id=row.trusted_account_id,
             input_message_id=row.input_message_id, output_tutor_answer_id=row.output_tutor_answer_id,
             status=row.status, intent=row.intent, route=row.route, idempotency_key=row.idempotency_key,
             correlation_id=row.correlation_id, step_count=row.step_count, maximum_steps=row.maximum_steps,
             started_at=row.started_at, waiting_at=row.waiting_at, completed_at=row.completed_at,
             cancelled_at=row.cancelled_at, failure_code=row.failure_code, failure_message=row.failure_message,
+            research_job_id=row.research_job_id, research_request_id=row.research_request_id,
+            research_run_id=row.research_run_id, research_deadline_at=row.research_deadline_at,
+            research_failure_category=row.research_failure_category, evidence_count=row.evidence_count,
             graph_version=row.graph_version, created_at=row.created_at, updated_at=row.updated_at,
         )
     except (ValidationError, ValueError, TypeError) as exc:

@@ -211,6 +211,21 @@ class TutorModelProviderError(StockResearchError):
     """
 
 
+class ResearchModelProviderError(StockResearchError):
+    """The configured Live Research synthesis model provider could not
+    produce an answer (spec G2D2/H1 correction pass, section 6).
+
+    Deliberately a distinct exception from `TutorModelProviderError` -
+    covers the same shape of failure (transient network error after
+    bounded retries, non-2xx response, structured-output validation
+    failure) but for the Ollama/OpenAI research-synthesis router, never
+    conflated with the Tutor model path. Never carries the raw provider
+    error message verbatim - always sanitized. The caller
+    (`synthesize_research_response`) maps this to a bounded, localized
+    `PROVIDER_FAILURE` response - never a fabricated answer.
+    """
+
+
 class UnsupportedDocumentError(StockResearchError):
     """A local document could not be parsed (unsupported type, oversized, or scanned/image-only)."""
 
@@ -592,3 +607,38 @@ class LiveResearchRequesterContextError(StockResearchError):
     (both/neither) identity, always before a `ResearchRequest` or
     `ResearchRun` exists; never retryable - the caller must supply
     exactly one and resubmit."""
+
+
+# -- Phase G2D2: Coach-to-Live-Research resume -----------------------------------------------
+
+
+class CoachResearchResumeStateConflictError(StockResearchError):
+    """`COACH_RESEARCH_RESUME` was invoked for a Coach run whose stored
+    `run_id`/`thread_id`/`research_job_id` does not match the resume
+    job's own parameters, or whose status is not `WAITING_FOR_RESEARCH`
+    and does not match the "already resumed" idempotent-no-op shape
+    either. Always a hard failure - never silently ignored, since it
+    means the resume job and the run it targets have drifted out of
+    sync."""
+
+
+class CoachResearchResumeOwnershipError(StockResearchError):
+    """The `LIVE_RESEARCH_RUN_EXECUTION` job's `requested_by_account_id`
+    (or the `ResearchRequest`'s own requester) does not match the Coach
+    run's `trusted_account_id`. Never retryable - a cross-account
+    mismatch can never resolve itself."""
+
+
+class CoachResearchResumeInconsistentJobError(StockResearchError):
+    """The linked `BackgroundJob` was not `LIVE_RESEARCH_RUN_EXECUTION`,
+    was not terminal, or its terminal interpretation (spec section 15)
+    was `INCONSISTENT`. Fails closed - never resumes the graph with an
+    ungrounded or ambiguous outcome."""
+
+
+class CoachResearchResumeNotConfiguredError(StockResearchError):
+    """`COACH_RESEARCH_RESUME` was routed to a process that was not
+    composed with a `PersonalizedLearningOrchestratorService` (every
+    process except `finquest-worker-coach`, which alone consumes the
+    `finquest.coach` queue). Reaching this handler on any other process
+    is a routing bug, not a normal operating condition."""

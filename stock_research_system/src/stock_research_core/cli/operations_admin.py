@@ -53,6 +53,24 @@ Job status / requeue:
     python -m stock_research_core.cli.operations_admin --job-status <UUID>
     python -m stock_research_core.cli.operations_admin --requeue-job <UUID>
 
+Reconcile Coach runs stuck WAITING_FOR_RESEARCH whose Live Research job
+is already terminal but has no matching COACH_RESEARCH_RESUME job yet,
+or whose resume job was created but never successfully reached the
+queue (spec G2D2 section 13, extended by the G2D2/H1 correction pass,
+section 9) - idempotent, safe to run repeatedly or on any cadence. No
+scheduler exists in this codebase (same precedent as SYSTEM_
+MAINTENANCE's own `expire_stale_running_jobs`), so an operator or an
+external cron invokes this directly:
+
+    python -m stock_research_core.cli.operations_admin --reconcile-waiting-coach-runs
+    python -m stock_research_core.cli.operations_admin --reconcile-waiting-coach-runs --batch-size 50
+
+Separately, expire any Coach run stuck WAITING_FOR_RESEARCH past its own
+research_deadline_at (a distributed lock and batch bound of its own -
+never combined with the sweep above, so the two can run independently):
+
+    python -m stock_research_core.cli.operations_admin --expire-waiting-research
+
 This module is a composition root: it is the one place outside the
 infrastructure layer allowed to import concrete adapters directly. It
 never logs a raw integration API key.
@@ -134,6 +152,22 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--create-job", default=None, metavar="JOB_TYPE", choices=[t.value for t in BackgroundJobType])
     parser.add_argument("--job-status", default=None, metavar="UUID")
     parser.add_argument("--requeue-job", default=None, metavar="UUID")
+    parser.add_argument(
+        "--reconcile-waiting-coach-runs", action="store_true",
+        help="Idempotent backstop (spec G2D2 section 13, extended by the G2D2/H1 correction pass): "
+        "create/reuse COACH_RESEARCH_RESUME jobs for any Coach run stuck WAITING_FOR_RESEARCH whose Live "
+        "Research job is already terminal, and enqueue/requeue any such resume job that was created but "
+        "never successfully reached the queue.",
+    )
+    parser.add_argument(
+        "--expire-waiting-research", action="store_true",
+        help="Idempotent backstop (spec G2D2/H1 correction pass, section 9): mark EXPIRED any Coach run "
+        "stuck WAITING_FOR_RESEARCH past its own research_deadline_at.",
+    )
+    parser.add_argument(
+        "--batch-size", type=int, default=100, metavar="N",
+        help="Bound for --reconcile-waiting-coach-runs/--expire-waiting-research (default 100).",
+    )
 
     parser.add_argument("--name", default=None, help="Integration client name (for --create-integration-client)")
     parser.add_argument(
@@ -408,10 +442,21 @@ async def _run(args: argparse.Namespace) -> int:
             await _requeue_job(service, job_id=args.requeue_job)
             return 0
 
+        if args.reconcile_waiting_coach_runs:
+            recovered_count = await service.reconcile_waiting_coach_runs(batch_size=args.batch_size)
+            print(f"created/enqueued/requeued {recovered_count} COACH_RESEARCH_RESUME job(s)")
+            return 0
+
+        if args.expire_waiting_research:
+            expired_count = await service.expire_stale_waiting_for_research_runs(batch_size=args.batch_size)
+            print(f"expired {expired_count} WAITING_FOR_RESEARCH run(s)")
+            return 0
+
         print(
             "error: specify one of --create-integration-client, --list-integration-clients, "
             "--revoke-integration-client, --grant-integration-job-type, --revoke-integration-job-type, "
-            "--create-job, --job-status, or --requeue-job",
+            "--create-job, --job-status, --requeue-job, --reconcile-waiting-coach-runs, or "
+            "--expire-waiting-research",
             file=sys.stderr,
         )
         return 2

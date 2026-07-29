@@ -108,7 +108,7 @@ class TestBuildDefaultRegistry:
         registry = build_default_registry(handlers)
         assert registry.all_queue_names() == {
             "finquest.default", "finquest.market", "finquest.portfolio", "finquest.knowledge", "finquest.evaluation",
-            "finquest.research",
+            "finquest.research", "finquest.coach",
         }
         entry = registry.get(BackgroundJobType.SYSTEM_MAINTENANCE)
         assert JobTriggerSource.API not in entry.allowed_trigger_sources

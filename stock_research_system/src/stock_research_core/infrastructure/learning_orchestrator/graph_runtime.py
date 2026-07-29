@@ -19,6 +19,7 @@ from langgraph.types import Command
 
 from stock_research_core.application.learning_orchestrator.event_stream import (
     error_event,
+    interrupt_reason,
     interrupt_to_event,
     node_update_to_events,
 )
@@ -54,14 +55,25 @@ class LangGraphOrchestratorRuntime:
         }
 
     @staticmethod
-    def _is_waiting_for_learner(result: dict[str, Any]) -> bool:
-        return bool(result.get("__interrupt__"))
+    def _interrupt_reason(result: dict[str, Any]) -> str | None:
+        """Returns `"approval"`, `"research"`, or `None` (graph ran to
+        completion) - the same `event_stream.interrupt_reason`
+        discrimination the streaming path already uses for SSE shaping,
+        so the non-streaming path can never disagree with it about which
+        interrupt just fired."""
+        interrupts = result.get("__interrupt__")
+        if not interrupts:
+            return None
+        return interrupt_reason(interrupts[0].value)
 
     # -- non-streaming -----------------------------------------------
 
     async def start_run(
         self, *, thread_id: str, run_id: str, initial_state: LearningCoachGraphState
-    ) -> tuple[LearningCoachGraphState, bool]:
+    ) -> tuple[LearningCoachGraphState, str | None]:
+        """Returns `(state, interrupt_reason)` where `interrupt_reason`
+        is `"approval"`, `"research"`, or `None` if the graph ran to
+        completion."""
         try:
             result = await asyncio.wait_for(
                 self._graph.ainvoke(initial_state, config=self._config(thread_id)),
@@ -69,11 +81,11 @@ class LangGraphOrchestratorRuntime:
             )
         except asyncio.TimeoutError as exc:
             raise RunTimeoutError(f"Run '{run_id}' exceeded {self._run_timeout_seconds}s.") from exc
-        return result, self._is_waiting_for_learner(result)
+        return result, self._interrupt_reason(result)
 
     async def resume_run(
         self, *, thread_id: str, run_id: str, resume_value: dict[str, Any]
-    ) -> tuple[LearningCoachGraphState, bool]:
+    ) -> tuple[LearningCoachGraphState, str | None]:
         try:
             result = await asyncio.wait_for(
                 self._graph.ainvoke(Command(resume=resume_value), config=self._config(thread_id)),
@@ -81,7 +93,7 @@ class LangGraphOrchestratorRuntime:
             )
         except asyncio.TimeoutError as exc:
             raise RunTimeoutError(f"Resume of run '{run_id}' exceeded {self._run_timeout_seconds}s.") from exc
-        return result, self._is_waiting_for_learner(result)
+        return result, self._interrupt_reason(result)
 
     # -- streaming -----------------------------------------------
 

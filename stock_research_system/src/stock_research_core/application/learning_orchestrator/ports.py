@@ -77,9 +77,13 @@ class LearningGraphRuntimePort(Protocol):
 
     async def start_run(
         self, *, thread_id: str, run_id: str, initial_state: LearningCoachGraphState
-    ) -> tuple[LearningCoachGraphState, bool]:
+    ) -> tuple[LearningCoachGraphState, str | None]:
         """Run the graph to completion or to its first interrupt.
-        Returns `(state, is_waiting_for_learner)`."""
+        Returns `(state, interrupt_reason)`, where `interrupt_reason` is
+        `"approval"` (paused at `approval_interrupt`), `"research"`
+        (paused at `await_research_result`), or `None` (the graph ran to
+        completion - success or otherwise, decided by the caller from
+        `state`)."""
         ...
 
     def stream_run(
@@ -90,7 +94,7 @@ class LearningGraphRuntimePort(Protocol):
 
     async def resume_run(
         self, *, thread_id: str, run_id: str, resume_value: dict[str, Any]
-    ) -> tuple[LearningCoachGraphState, bool]:
+    ) -> tuple[LearningCoachGraphState, str | None]:
         ...
 
     def stream_resume(
@@ -137,6 +141,29 @@ class LearningOrchestratorRunRepositoryPort(Protocol):
     async def mark_running(self, run_id: UUID, *, started_at: datetime) -> LearningOrchestratorRun: ...
 
     async def mark_waiting_for_learner(self, run_id: UUID, *, waiting_at: datetime) -> LearningOrchestratorRun: ...
+
+    async def mark_waiting_for_research(
+        self, run_id: UUID, *, waiting_at: datetime, research_job_id: UUID, research_deadline_at: datetime,
+    ) -> LearningOrchestratorRun: ...
+
+    async def set_research_outcome(
+        self, run_id: UUID, *, research_request_id: UUID | None, research_run_id: UUID | None,
+        research_failure_category: str | None, evidence_count: int | None,
+    ) -> LearningOrchestratorRun: ...
+
+    async def get_by_research_job_id(self, research_job_id: UUID) -> LearningOrchestratorRun | None: ...
+
+    async def list_waiting_for_research(self, *, limit: int = 100) -> list[LearningOrchestratorRun]: ...
+
+    async def list_waiting_for_research_past_deadline(
+        self, *, now: datetime, limit: int = 100
+    ) -> list[LearningOrchestratorRun]:
+        """G2D2/H1 correction pass, section 9, scenario 4: `WAITING_FOR_
+        RESEARCH` rows whose own `research_deadline_at` is already in the
+        past - the reconciliation sweep's deadline-expiry backstop."""
+        ...
+
+    async def mark_expired(self, run_id: UUID, *, completed_at: datetime) -> LearningOrchestratorRun: ...
 
     async def update_progress(
         self, run_id: UUID, *, step_count: int, intent: str | None = None, route: str | None = None

@@ -15,7 +15,8 @@ from stock_research_core.application.learning_orchestrator.state import (
 
 def test_new_state_truncates_user_input_to_max_context_characters() -> None:
     state = new_state(
-        thread_id=str(uuid4()), run_id=str(uuid4()), learner_id=str(uuid4()), correlation_id=str(uuid4()),
+        thread_id=str(uuid4()), run_id=str(uuid4()), learner_id=str(uuid4()), trusted_account_id=str(uuid4()),
+        correlation_id=str(uuid4()),
         graph_version="v1", user_input="x" * (DEFAULT_MAX_CONTEXT_CHARACTERS + 500),
         requested_context_type="GENERAL_EDUCATION",
     )
@@ -24,7 +25,8 @@ def test_new_state_truncates_user_input_to_max_context_characters() -> None:
 
 def test_new_state_defaults_context_references_to_empty_dict() -> None:
     state = new_state(
-        thread_id=str(uuid4()), run_id=str(uuid4()), learner_id=str(uuid4()), correlation_id=str(uuid4()),
+        thread_id=str(uuid4()), run_id=str(uuid4()), learner_id=str(uuid4()), trusted_account_id=str(uuid4()),
+        correlation_id=str(uuid4()),
         graph_version="v1", user_input="hello", requested_context_type="GENERAL_EDUCATION",
     )
     assert state["context_references"] == {}
@@ -34,7 +36,8 @@ def test_new_state_defaults_context_references_to_empty_dict() -> None:
 
 def test_new_state_accepts_custom_maximum_steps() -> None:
     state = new_state(
-        thread_id=str(uuid4()), run_id=str(uuid4()), learner_id=str(uuid4()), correlation_id=str(uuid4()),
+        thread_id=str(uuid4()), run_id=str(uuid4()), learner_id=str(uuid4()), trusted_account_id=str(uuid4()),
+        correlation_id=str(uuid4()),
         graph_version="v1", user_input="hello", requested_context_type="GENERAL_EDUCATION", maximum_steps=10,
     )
     assert state["maximum_steps"] == 10
@@ -56,9 +59,20 @@ def test_forbidden_state_keys_cover_infrastructure_and_secrets() -> None:
     assert expected_present <= FORBIDDEN_STATE_KEYS
 
 
+def test_new_state_carries_the_trusted_account_id_verbatim() -> None:
+    account_id = str(uuid4())
+    state = new_state(
+        thread_id=str(uuid4()), run_id=str(uuid4()), learner_id=str(uuid4()), trusted_account_id=account_id,
+        correlation_id=str(uuid4()), graph_version="v1", user_input="hello",
+        requested_context_type="GENERAL_EDUCATION",
+    )
+    assert state["trusted_account_id"] == account_id
+
+
 def test_new_state_never_produces_a_forbidden_key() -> None:
     state = new_state(
-        thread_id=str(uuid4()), run_id=str(uuid4()), learner_id=str(uuid4()), correlation_id=str(uuid4()),
+        thread_id=str(uuid4()), run_id=str(uuid4()), learner_id=str(uuid4()), trusted_account_id=str(uuid4()),
+        correlation_id=str(uuid4()),
         graph_version="v1", user_input="hello", requested_context_type="GENERAL_EDUCATION",
     )
     assert set(state.keys()).isdisjoint(FORBIDDEN_STATE_KEYS)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, UniqueConstraint, func
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, UniqueConstraint, func, text
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -21,6 +21,11 @@ class LearningOrchestratorRunORM(Base):
         UniqueConstraint("thread_id", "idempotency_key", name="uq_learning_orchestrator_runs_thread_idempotency"),
         Index("ix_learning_orchestrator_runs_thread_created", "thread_id", "created_at"),
         Index("ix_learning_orchestrator_runs_status", "status"),
+        Index("ix_learning_orchestrator_runs_status_research_job", "status", "research_job_id"),
+        Index(
+            "uq_learning_orchestrator_runs_research_job_id", "research_job_id", unique=True,
+            postgresql_where=text("research_job_id IS NOT NULL"),
+        ),
     )
 
     run_id: Mapped[uuid.UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
@@ -29,6 +34,14 @@ class LearningOrchestratorRunORM(Base):
     )
     learner_id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("learner_profiles.learner_id", ondelete="RESTRICT"), nullable=False
+    )
+    # Nullable to accommodate legacy rows a production backfill (migration
+    # 0013) could not resolve through the authoritative user_accounts.
+    # learner_id relationship. Required for every *new* run at the
+    # application boundary instead (LearningOrchestratorService.start_run
+    # / stream_start_run), never at the DB constraint level.
+    trusted_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("user_accounts.account_id", ondelete="RESTRICT"), nullable=True
     )
 
     input_message_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -55,6 +68,14 @@ class LearningOrchestratorRunORM(Base):
 
     failure_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
     failure_message: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+
+    # -- Coach-to-Live-Research correlation (spec G2D2 sections 11-12) -----------------------------------------------
+    research_job_id: Mapped[uuid.UUID | None] = mapped_column(PG_UUID(as_uuid=True), nullable=True)
+    research_request_id: Mapped[uuid.UUID | None] = mapped_column(PG_UUID(as_uuid=True), nullable=True)
+    research_run_id: Mapped[uuid.UUID | None] = mapped_column(PG_UUID(as_uuid=True), nullable=True)
+    research_deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    research_failure_category: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    evidence_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     graph_version: Mapped[str] = mapped_column(String(50), nullable=False)
     created_at: Mapped[datetime] = mapped_column(

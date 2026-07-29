@@ -62,6 +62,7 @@ from typing import Any
 from uuid import UUID
 
 from stock_research_core.application.ai_tutor.guardrails import more_restrictive_decision
+from stock_research_core.application.ai_tutor.diagnostics import TutorDiagnosticIssueCode, log_tutor_diagnostic
 from stock_research_core.application.ai_tutor.models import (
     LearnerSafeCitation,
     RetrievalCandidate,
@@ -84,6 +85,7 @@ from stock_research_core.application.exceptions import (
     TutorConversationNotFoundError,
 )
 from stock_research_core.application.language.enums import DetectedLanguage, LocalizedMessageKey
+from stock_research_core.application.language.localization import localize
 from stock_research_core.application.language.ports import LanguageServicePort
 from stock_research_core.application.language.query_preparation import (
     LanguageQueryPreparation,
@@ -130,6 +132,26 @@ _ANSWER_LANGUAGE_REPAIR_INSTRUCTION = (
 )
 
 Clock = Callable[[], datetime]
+
+# Maps `RuleBasedTutorGuardrail.validate_output`'s own issue vocabulary
+# (guaranteed-return claims, buy/sell instructions, scenario/portfolio
+# leaks, hidden-reasoning markers - none of which are themselves one of
+# the 10 bounded `TutorDiagnosticIssueCode`s) onto the closest
+# diagnostic code, so a real guardrail finding is never silently dropped
+# by `log_tutor_diagnostic`'s unknown-code filter. Codes already present
+# in `TutorDiagnosticIssueCode.ALL` (e.g. `INVALID_CITATION_CHUNK_ID`,
+# `UNVERIFIED_URL`) pass through unchanged.
+_GUARDRAIL_ISSUE_TO_DIAGNOSTIC_CODE = {
+    "GUARANTEED_RETURN_CLAIM": TutorDiagnosticIssueCode.UNSAFE_GENERATED_OUTPUT,
+    "DIRECT_BUY_SELL_INSTRUCTION": TutorDiagnosticIssueCode.UNSAFE_GENERATED_OUTPUT,
+    "SCENARIO_FUTURE_INFORMATION_LEAK": TutorDiagnosticIssueCode.UNSAFE_GENERATED_OUTPUT,
+    "PORTFOLIO_TRADE_PRESCRIPTION": TutorDiagnosticIssueCode.UNSAFE_GENERATED_OUTPUT,
+    "HIDDEN_REASONING_MARKER": TutorDiagnosticIssueCode.UNSAFE_GENERATED_OUTPUT,
+}
+
+
+def _to_diagnostic_issue_codes(guardrail_issues: list[str]) -> list[str]:
+    return [_GUARDRAIL_ISSUE_TO_DIAGNOSTIC_CODE.get(issue, issue) for issue in guardrail_issues]
 
 
 @dataclass(frozen=True)
@@ -327,15 +349,17 @@ class GroundedAITutorService:
             sufficiency_decision = self._sufficiency_gate.evaluate(
                 query=preparation.search_query, candidates=candidates, context=effective_context
             )
-            # Phase G2E2A: the deterministic extractive provider only ever
-            # extracts verbatim sentences from the (English) retrieved
-            # chunks - it cannot translate, so it must never be asked to
-            # answer a Hebrew question. Localized fallback, never a
-            # silently English answer to a Hebrew learner.
+            # Preserve the extractive/Hebrew fail-closed rule and emit G2D2 safe diagnostics.
             extractive_cannot_answer_hebrew = (
                 preparation.is_hebrew and self._tutor_model.provider_type == TutorProviderType.EXTRACTIVE
             )
             if not sufficiency_decision.sufficient or extractive_cannot_answer_hebrew:
+                log_tutor_diagnostic(
+                    provider_type=self._tutor_model.provider_type, model_name="tutor-guardrail-v1",
+                    attempt_number=0, retrieval_candidate_count=len(candidates), cited_id_count=0,
+                    issue_codes=[TutorDiagnosticIssueCode.RETRIEVAL_INSUFFICIENT],
+                    conversation_id=conversation_id,
+                )
                 response = await self._finalize_fallback(
                     uow, conversation, user_message, saved_decision, effective_context,
                     language=preparation.detected_language, retrieval_run_id=saved_run.retrieval_run_id,
@@ -460,6 +484,7 @@ class GroundedAITutorService:
         return self._guardrail.evaluate_input(
             conversation_id=conversation_id, message=user_message, context=context,
             language=language, apply_topic_vocabulary_check=language != DetectedLanguage.HE,
+            apply_hebrew_topic_vocabulary_check=self._language_service_enabled,
         )
 
     def _decide_with_translation(
@@ -683,7 +708,11 @@ class GroundedAITutorService:
         language: DetectedLanguage = DetectedLanguage.EN,
         retrieval_run_id: UUID | None,
     ) -> TutorResponse:
-        fallback_text = self._language_service.localize(LocalizedMessageKey.INSUFFICIENT_EVIDENCE, language=language)
+        fallback_text = (
+            self._language_service.localize(LocalizedMessageKey.INSUFFICIENT_EVIDENCE, language=language)
+            if self._language_service_enabled
+            else localize(LocalizedMessageKey.INSUFFICIENT_EVIDENCE, language=DetectedLanguage.EN)
+        )
         answer = TutorAnswer(
             conversation_id=conversation.conversation_id,
             request_message_id=user_message.message_id,

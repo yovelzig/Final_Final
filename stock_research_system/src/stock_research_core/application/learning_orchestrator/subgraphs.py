@@ -20,6 +20,9 @@ happen once a learner has approved, inside `AllowlistedLearningActionExecutor`.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import inspect
+import inspect
+import inspect
 from typing import Any
 from uuid import UUID
 
@@ -101,10 +104,10 @@ class Subgraphs:
             context = TutorContext(context_type=TutorContextType.GENERAL_EDUCATION, learner_id=learner_id)
             conversation = await self._deps.tutor_service.create_conversation(learner_id=learner_id, context=context)
             conversation_id = conversation.conversation_id
-        response = await self._deps.tutor_service.ask(
-            conversation_id=conversation_id, question=state["user_input"],
-            prepared_language=prepared_language_from_state(state),
-        )
+        ask_kwargs = {"conversation_id": conversation_id, "question": state["user_input"]}
+        if "prepared_language" in inspect.signature(self._deps.tutor_service.ask).parameters:
+            ask_kwargs["prepared_language"] = prepared_language_from_state(state)
+        response = await self._deps.tutor_service.ask(**ask_kwargs)
         return _tutor_response_to_state(response, conversation_id=conversation_id)
 
     # -- 14.2 lesson tutor -----------------------------------------------

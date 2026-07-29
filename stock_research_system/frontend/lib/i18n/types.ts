@@ -240,6 +240,10 @@ export interface Dictionary {
     approve: string;
     notNow: string;
     continueLabel: string;
+    researchStarted: string;
+    researchWaiting: string;
+    researchTimedOut: string;
+    researchFailed: string;
   };
   emptyState: {
     genericTitle: string;

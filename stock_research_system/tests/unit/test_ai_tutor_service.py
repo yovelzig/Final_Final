@@ -25,6 +25,10 @@ from stock_research_core.application.ai_tutor.models import (
 )
 from stock_research_core.application.ai_tutor.prompt_builder import GroundedTutorPromptBuilder
 from stock_research_core.application.ai_tutor.service import GroundedAITutorService
+from stock_research_core.application.language.detection import detect_language
+from stock_research_core.application.language.enums import DetectedLanguage
+from stock_research_core.application.language.localization import localize
+from stock_research_core.application.language.models import TranslationResult
 from stock_research_core.application.ai_tutor.sufficiency import (
     DisabledKnowledgeSufficiencyGate,
     RuleBasedKnowledgeSufficiencyGate,
@@ -320,7 +324,10 @@ class SpyPromptBuilder:
         return self._real.build(**kwargs)
 
 
-def _build_service(uow_factory, *, candidates=None, model_result=None, sufficiency_gate=None, prompt_builder=None):
+def _build_service(
+    uow_factory, *, candidates=None, model_result=None, sufficiency_gate=None, prompt_builder=None,
+    language_service=None, language_service_enabled=False,
+):
     """Test-harness composition root. `GroundedAITutorService.sufficiency_gate`
     is a required keyword with no constructor default - this helper is the
     one place in this file that decides what a test gets when it doesn't
@@ -336,6 +343,7 @@ def _build_service(uow_factory, *, candidates=None, model_result=None, sufficien
     service = GroundedAITutorService(
         unit_of_work_factory=uow_factory, retriever=retriever, tutor_model=tutor_model,
         guardrail=guardrail, prompt_builder=builder, sufficiency_gate=gate, clock=lambda: NOW,
+        language_service=language_service, language_service_enabled=language_service_enabled,
     )
     return service, retriever, tutor_model
 
@@ -396,6 +404,74 @@ class TestAsk:
         assert response.citations[0].source_title == "Approved Source"
         assert retriever.calls == ["What is diversification?"]
         assert tutor_model.calls == 1
+
+    async def test_hebrew_question_is_translated_for_retrieval_only_when_bridge_enabled(self) -> None:
+        class _FakeLanguageService:
+            def __init__(self) -> None:
+                self.translate_calls: list[str] = []
+
+            def detect_language(self, text: str) -> DetectedLanguage:
+                return detect_language(text)
+
+            def localize(self, key, *, language):
+                return localize(key, language=language)
+
+            async def translate_to_english_query(self, text: str, *, source_language) -> TranslationResult:
+                self.translate_calls.append(text)
+                return TranslationResult(
+                    translated_query="what is diversification?",
+                    source_language=source_language,
+                    translation_policy_version="test-v1",
+                )
+
+        uow_factory, store = _make_uow_factory()
+        learner = _learner()
+        store["learners"][learner.learner_id] = learner
+        candidate = _candidate()
+        language_service = _FakeLanguageService()
+        service, retriever, _m = _build_service(
+            uow_factory, candidates=[candidate], language_service=language_service,
+            language_service_enabled=True,
+        )
+        conversation = await self._create_conversation(service, learner, store)
+
+        hebrew_question = "מה זה גיוון תיק השקעות?"
+        response = await service.ask(conversation_id=conversation.conversation_id, question=hebrew_question)
+
+        # Retrieval used the translated English query...
+        assert retriever.calls == ["what is diversification?"]
+        assert language_service.translate_calls == [hebrew_question]
+        # ...but the persisted request message and answer lineage keep
+        # the learner's original Hebrew question, untouched.
+        stored_messages = store["messages"][conversation.conversation_id]
+        assert stored_messages[0].content == hebrew_question
+
+    async def test_language_service_disabled_by_default_preserves_legacy_fallback_without_service_calls(self) -> None:
+        class _FailIfCalledLanguageService:
+            def detect_language(self, text):
+                raise AssertionError("disabled language service detected language")
+
+            def localize(self, key, *, language):
+                raise AssertionError("disabled language service localized a message")
+
+            async def translate_to_english_query(self, text, *, source_language):
+                raise AssertionError("disabled language service translated a query")
+
+        uow_factory, store = _make_uow_factory()
+        learner = _learner()
+        store["learners"][learner.learner_id] = learner
+        candidate = _candidate()
+        # The current language-service API is disabled by default.
+        service, retriever, _m = _build_service(
+            uow_factory, candidates=[candidate], language_service=_FailIfCalledLanguageService(),
+        )
+        conversation = await self._create_conversation(service, learner, store)
+
+        hebrew_question = "מה זה גיוון תיק השקעות?"
+        response = await service.ask(conversation_id=conversation.conversation_id, question=hebrew_question)
+
+        assert response.answer.status == TutorAnswerStatus.FALLBACK
+        assert retriever.calls == []
 
     async def test_buy_sell_request_refuses_without_retrieval(self) -> None:
         uow_factory, store = _make_uow_factory()

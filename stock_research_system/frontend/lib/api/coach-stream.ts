@@ -40,7 +40,21 @@ export type CoachStreamEvent =
   | { type: "action_completed" }
   | { type: "run_completed"; run_id?: string; status?: string }
   | { type: "error"; message: string }
-  | { type: "heartbeat" };
+  | { type: "heartbeat" }
+  | { type: "research_started"; research_job_id: string | null; deadline_at: string | null }
+  | { type: "research_waiting_update"; research_job_id: string | null; scope: string | null; deadline_at: string | null }
+  | {
+      type: "research_completed";
+      answer_markdown: string | null;
+      grounding_status: string | null;
+      navigation_target: string | null;
+    }
+  | {
+      type: "research_unavailable";
+      answer_markdown: string | null;
+      grounding_status: string | null;
+      navigation_target: string | null;
+    };
 
 export interface StreamCoachOptions {
   onEvent: (event: CoachStreamEvent) => void;

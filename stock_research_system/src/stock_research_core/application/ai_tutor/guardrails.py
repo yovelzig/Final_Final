@@ -45,6 +45,7 @@ from __future__ import annotations
 import re
 from uuid import UUID
 
+from stock_research_core.application.ai_tutor.citation_verifier import TutorCitationVerifier
 from stock_research_core.application.ai_tutor.models import RetrievalCandidate, TutorContext
 from stock_research_core.application.language.enums import DetectedLanguage, LocalizedMessageKey
 from stock_research_core.application.language.localization import localize
@@ -225,13 +226,43 @@ def _matches_any(text: str, patterns: tuple[re.Pattern[str], ...]) -> str | None
 
 _FINANCE_EDUCATION_STEMS = ("diversif", "invest", "portfol", "financ")
 
+# Spec G2D2 section 6: a bounded Hebrew finance-vocabulary allow-list,
+# scoped *only* to the off-topic/FALLBACK check below - so a legitimate
+# Hebrew finance question can still reach `classify_intent`/retrieval
+# instead of being misclassified as off-topic purely because
+# `_FINANCE_EDUCATION_VOCABULARY` only recognizes English tokens.
+# Deliberately does NOT extend the REFUSE-triggering patterns above
+# (buy/sell, guaranteed-return, personalized-allocation) - those remain
+# English-only in this phase, so a Hebrew buy/sell instruction still
+# falls through to the same safe FALLBACK behavior it gets today, never
+# a weaker outcome than before this change.
+#
+# Checked as a *substring* of the text's Hebrew-only characters, not an
+# exact token match: Hebrew attaches the definite article and common
+# prepositions (ה/ל/ב/כ/ש/ו) directly onto a word as a single-letter
+# prefix (e.g. "השקעות" -> "בהשקעות"/"להשקעות"), so a short root
+# substring is far more robust than exact-word matching against every
+# possible prefixed/suffixed inflection - the same "under/over-match is
+# an accepted tradeoff for a deterministic, auditable check" already
+# documented for the English stem check just below.
+_FINANCE_EDUCATION_ROOTS_HE = (
+    "השקע", "משקיע", "מניה", "מניו", "מני", "אג\"ח", "אגח", "קרן", "קרנ", "שוק", "תיק", "גיוון",
+    "סיכון", "סיכונ", "תשוא", "מחיר", "תנודתי", "מדד", "ריבית", "אינפלצי", "דיבידנד", "כלכל",
+    "נכס", "הקצא", "הון", "מזומן", "מטבע", "מסחר", "עסק", "שווי", "גידור", "נזיל", "סקטור",
+    "ניירות ערך", "פיננס", "מנכ\"ל", "דוח", "דיווח", "אנליסט", "חדשות", "מיומנ", "מושג",
+)
 
-def _is_off_topic(text: str) -> bool:
+
+def _is_off_topic(text: str, *, apply_hebrew_vocabulary_check: bool = True) -> bool:
     tokens = re.findall(r"[a-z]+", text.lower())
     if any(token in _FINANCE_EDUCATION_VOCABULARY for token in tokens):
         return False
     if any(token.startswith(_FINANCE_EDUCATION_STEMS) for token in tokens):
         return False
+    if apply_hebrew_vocabulary_check:
+        hebrew_text = "".join(re.findall("[֐-׿\"]+", text))
+        if any(root in hebrew_text for root in _FINANCE_EDUCATION_ROOTS_HE):
+            return False
     return True
 
 
@@ -279,6 +310,9 @@ class RuleBasedTutorGuardrail:
 
     policy_version = GUARDRAIL_POLICY_VERSION
 
+    def __init__(self, *, citation_verifier: TutorCitationVerifier | None = None) -> None:
+        self._citation_verifier = citation_verifier or TutorCitationVerifier()
+
     def evaluate_input(
         self,
         *,
@@ -287,6 +321,7 @@ class RuleBasedTutorGuardrail:
         context: TutorContext,
         language: DetectedLanguage = DetectedLanguage.EN,
         apply_topic_vocabulary_check: bool = True,
+        apply_hebrew_topic_vocabulary_check: bool = True,
     ) -> TutorGuardrailDecision:
         text = message.content
 
@@ -340,7 +375,9 @@ class RuleBasedTutorGuardrail:
                 policy_version=self.policy_version,
             )
 
-        if apply_topic_vocabulary_check and _is_off_topic(text):
+        if apply_topic_vocabulary_check and _is_off_topic(
+            text, apply_hebrew_vocabulary_check=apply_hebrew_topic_vocabulary_check
+        ):
             return TutorGuardrailDecision(
                 conversation_id=conversation_id,
                 message_id=message.message_id,
@@ -371,10 +408,11 @@ class RuleBasedTutorGuardrail:
     ) -> tuple[GroundingStatus, list[str]]:
         issues: list[str] = []
 
-        retrieved_ids = {candidate.chunk.chunk_id for candidate in retrieved_candidates}
-        invalid_citations = [chunk_id for chunk_id in cited_chunk_ids if chunk_id not in retrieved_ids]
-        if invalid_citations:
-            issues.append("INVALID_CITATION_CHUNK_ID")
+        issues.extend(
+            self._citation_verifier.check_citations(
+                cited_chunk_ids=cited_chunk_ids, retrieved_candidates=retrieved_candidates
+            )
+        )
 
         if _claims_guaranteed_return(answer_text):
             issues.append("GUARANTEED_RETURN_CLAIM")
@@ -402,20 +440,14 @@ class RuleBasedTutorGuardrail:
         ):
             issues.append("PORTFOLIO_TRADE_PRESCRIPTION")
 
-        allowed_urls = {
-            candidate.source.canonical_url
-            for candidate in retrieved_candidates
-            if candidate.source.canonical_url
-        }
-        for url in re.findall(r"https?://\S+", answer_text):
-            if url.rstrip(".,)") not in allowed_urls:
-                issues.append("UNVERIFIED_URL")
-                break
+        issues.extend(
+            self._citation_verifier.check_urls(answer_text=answer_text, retrieved_candidates=retrieved_candidates)
+        )
 
         if re.search(r"<thinking>|chain[- ]of[- ]thought|hidden reasoning", answer_text, re.IGNORECASE):
             issues.append("HIDDEN_REASONING_MARKER")
 
-        if invalid_citations:
+        if "INVALID_CITATION_CHUNK_ID" in issues:
             status = GroundingStatus.INVALID_CITATIONS
         elif not cited_chunk_ids and answer_text not in _APPROVED_NON_CITED_TEXTS:
             status = GroundingStatus.INSUFFICIENT_EVIDENCE

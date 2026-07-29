@@ -36,6 +36,15 @@ class LearningCoachGraphState(TypedDict, total=False):
     thread_id: str
     run_id: str
     learner_id: str
+    #: The account identity for this run, resolved *once* by the service
+    #: layer from `AuthenticatedPrincipal.account_id` and written only by
+    #: `new_state()` at run creation. No node may ever write this key -
+    #: it is not derived from `user_input`, `context_references`,
+    #: `approval_result`, or any other resume-payload-sourced value, so a
+    #: learner can never influence it. It persists unchanged across every
+    #: interrupt/resume of a run via the checkpointer, exactly like
+    #: `learner_id`.
+    trusted_account_id: str
     correlation_id: str
     graph_version: str
 
@@ -79,6 +88,14 @@ class LearningCoachGraphState(TypedDict, total=False):
     approval_result: dict[str, Any]
     action_result: dict[str, Any]
 
+    # -- automatic live research (spec G2D2 section 11) -----------------------------------------------
+    #: Set only by `request_live_research`; read by `await_research_result`
+    #: and `synthesize_research_response`. Never resume-payload-sourced.
+    research_job_id: str
+    research_scope: str
+    research_deadline_at: str
+    research_outcome: dict[str, Any]
+
     # -- execution -----------------------------------------------
     step_count: int
     maximum_steps: int
@@ -102,15 +119,20 @@ FORBIDDEN_STATE_KEYS = frozenset(
 
 
 def new_state(
-    *, thread_id: str, run_id: str, learner_id: str, correlation_id: str, graph_version: str, user_input: str,
-    requested_context_type: str, context_references: dict[str, str] | None = None, maximum_steps: int = 30,
+    *, thread_id: str, run_id: str, learner_id: str, trusted_account_id: str | None = None, correlation_id: str,
+    graph_version: str, user_input: str, requested_context_type: str,
+    context_references: dict[str, str] | None = None, maximum_steps: int = 30,
 ) -> LearningCoachGraphState:
     """Build the initial state for a new run. `context_references` values
     are already `str`-encoded UUIDs by the time they reach here (the
-    service layer converts at the boundary)."""
+    service layer converts at the boundary). `trusted_account_id` must be
+    the caller's own `AuthenticatedPrincipal.account_id` - the service
+    layer is the only place this function may be called with a value
+    that did not come straight from server-side authentication."""
     return LearningCoachGraphState(
-        thread_id=thread_id, run_id=run_id, learner_id=learner_id, correlation_id=correlation_id,
-        graph_version=graph_version, user_input=user_input[:DEFAULT_MAX_CONTEXT_CHARACTERS],
+        thread_id=thread_id, run_id=run_id, learner_id=learner_id, trusted_account_id=trusted_account_id or learner_id,
+        correlation_id=correlation_id, graph_version=graph_version,
+        user_input=user_input[:DEFAULT_MAX_CONTEXT_CHARACTERS],
         requested_context_type=requested_context_type, context_references=context_references or {},
         step_count=0, maximum_steps=maximum_steps, warnings=[], safe_errors=[],
     )

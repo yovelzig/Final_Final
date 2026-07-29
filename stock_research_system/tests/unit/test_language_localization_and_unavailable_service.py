@@ -49,6 +49,13 @@ def test_every_localized_string_is_non_blank_and_distinct_per_language() -> None
     assert en != he
 
 
+@pytest.mark.parametrize("key", list(LocalizedMessageKey))
+def test_every_hebrew_localized_string_contains_real_hebrew_script_without_mojibake(key) -> None:
+    text = localize(key, language=DetectedLanguage.HE)
+    assert any("\u0590" <= character <= "\u05ff" for character in text)
+    assert not any(marker in text for marker in ("Ã", "Â", "â", "×"))
+
+
 class TestUnavailableLanguageService:
     def test_detect_language_works_and_is_pure(self) -> None:
         service = UnavailableLanguageService()

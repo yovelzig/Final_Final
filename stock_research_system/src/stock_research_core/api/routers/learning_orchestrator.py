@@ -21,7 +21,12 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Header, Query, status
 from fastapi.responses import StreamingResponse
 
-from stock_research_core.api.dependencies import get_learning_orchestrator_service, rate_limit, require_learner_identity
+from stock_research_core.api.dependencies import (
+    get_current_principal,
+    get_learning_orchestrator_service,
+    rate_limit,
+    require_learner_identity,
+)
 from stock_research_core.api.schemas.learning_orchestrator import (
     CreateThreadRequest,
     LearningCoachApprovalRequest,
@@ -31,6 +36,7 @@ from stock_research_core.api.schemas.learning_orchestrator import (
     LearningCoachThreadResponse,
     StartRunRequest,
 )
+from stock_research_core.application.identity.models import AuthenticatedPrincipal
 from stock_research_core.application.learning_orchestrator.models import LearningApprovalRequest
 from stock_research_core.application.learning_orchestrator.service import PersonalizedLearningOrchestratorService
 from stock_research_core.domain.learning_orchestrator.enums import LearningOrchestratorThreadStatus
@@ -119,12 +125,13 @@ async def start_run(
     thread_id: UUID,
     payload: StartRunRequest,
     learner_id: Annotated[UUID, Depends(require_learner_identity)],
+    principal: Annotated[AuthenticatedPrincipal, Depends(get_current_principal)],
     service: Annotated[PersonalizedLearningOrchestratorService, Depends(get_learning_orchestrator_service)],
     idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=1, max_length=200)],
 ) -> LearningCoachRunResponse:
     run = await service.start_run(
-        learner_id=learner_id, thread_id=thread_id, user_input=payload.user_input,
-        idempotency_key=idempotency_key, context_references=payload.context_references,
+        learner_id=learner_id, trusted_account_id=principal.account_id, thread_id=thread_id,
+        user_input=payload.user_input, idempotency_key=idempotency_key, context_references=payload.context_references,
     )
     return LearningCoachRunResponse.from_domain(run)
 
@@ -137,12 +144,13 @@ async def stream_start_run(
     thread_id: UUID,
     payload: StartRunRequest,
     learner_id: Annotated[UUID, Depends(require_learner_identity)],
+    principal: Annotated[AuthenticatedPrincipal, Depends(get_current_principal)],
     service: Annotated[PersonalizedLearningOrchestratorService, Depends(get_learning_orchestrator_service)],
     idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=1, max_length=200)],
 ) -> StreamingResponse:
     events = service.stream_start_run(
-        learner_id=learner_id, thread_id=thread_id, user_input=payload.user_input,
-        idempotency_key=idempotency_key, context_references=payload.context_references,
+        learner_id=learner_id, trusted_account_id=principal.account_id, thread_id=thread_id,
+        user_input=payload.user_input, idempotency_key=idempotency_key, context_references=payload.context_references,
     )
     return _streaming_response(events)
 

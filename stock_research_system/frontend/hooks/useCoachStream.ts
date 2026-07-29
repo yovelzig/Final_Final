@@ -17,12 +17,20 @@ export interface CoachTurn {
   navigationTarget: string | null;
   errorMessage: string | null;
   isComplete: boolean;
+  /** Spec G2D2 section 12: automatic Live Research trigger status for
+   * this turn - `null` unless the Coach graph actually routed this
+   * question through the Live Research branch. Purely server-driven:
+   * there is no manual "resume" action, the next SSE event moves this
+   * along automatically. */
+  researchStatus: "started" | "waiting" | "completed" | "unavailable" | null;
+  researchDeadlineAt: string | null;
 }
 
 function newTurn(userInput: string): CoachTurn {
   return {
     id: generateIdempotencyKey(), runId: null, userInput, stage: null, answerMarkdown: null, citations: [],
     approvalRequest: null, approvalDecision: null, navigationTarget: null, errorMessage: null, isComplete: false,
+    researchStatus: null, researchDeadlineAt: null,
   };
 }
 
@@ -60,6 +68,24 @@ export function useCoachStream(threadId: string) {
             return { ...turn, isComplete: true, stage: null };
           case "error":
             return { ...turn, errorMessage: event.message, isComplete: true, stage: null };
+          case "research_started":
+            return { ...turn, researchStatus: "started", researchDeadlineAt: event.deadline_at, stage: null };
+          case "research_waiting_update":
+            return {
+              ...turn, researchStatus: "waiting",
+              researchDeadlineAt: event.deadline_at ?? turn.researchDeadlineAt, stage: null,
+            };
+          case "research_completed":
+            return {
+              ...turn, researchStatus: "completed",
+              answerMarkdown: event.answer_markdown ?? turn.answerMarkdown,
+              navigationTarget: event.navigation_target ?? turn.navigationTarget, stage: null,
+            };
+          case "research_unavailable":
+            return {
+              ...turn, researchStatus: "unavailable",
+              answerMarkdown: event.answer_markdown ?? turn.answerMarkdown, stage: null,
+            };
           default:
             return turn;
         }

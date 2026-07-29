@@ -26,7 +26,11 @@ from stock_research_core.application.learning_orchestrator.nodes import (
     prepared_language_from_state,
 )
 from stock_research_core.application.learning_orchestrator.state import new_state
-from stock_research_core.domain.ai_tutor.models import EXACT_ADVICE_REFUSAL_HE, EXACT_INSUFFICIENT_EVIDENCE_FALLBACK_HE
+from stock_research_core.domain.ai_tutor.models import (
+    EXACT_ADVICE_REFUSAL_HE,
+    EXACT_INSUFFICIENT_EVIDENCE_FALLBACK,
+    EXACT_INSUFFICIENT_EVIDENCE_FALLBACK_HE,
+)
 from stock_research_core.domain.learning_orchestrator.enums import LearningIntent, LearningOrchestratorRoute
 
 from tests.unit.learning_orchestrator_fakes import FakeUnitOfWork
@@ -95,6 +99,20 @@ def _state(user_input: str, **overrides):
     )
     state.update(overrides)
     return state
+
+
+async def test_feature_flag_disabled_hebrew_question_behaves_like_pre_phase_baseline() -> None:
+    language_service = FakeLanguageService()
+    nodes = _nodes(language_service_enabled=False, language_service=language_service)
+    state = _state(_HEBREW_QUESTION)
+
+    result = await nodes.evaluate_input_guardrail(state)
+
+    assert result['guardrail_result']['action'] == 'FALLBACK'
+    assert result['guardrail_result']['safe_response_override'] == EXACT_INSUFFICIENT_EVIDENCE_FALLBACK
+    assert result['language_preparation']['intent_query'] == _HEBREW_QUESTION
+    assert result['language_preparation']['translation_attempted'] is False
+    assert language_service.translate_calls == []
 
 
 class TestFeatureFlagDisabledIsByteIdenticalToBaseline:

@@ -146,3 +146,53 @@ class KnowledgeSufficiencySettings(BaseSettings):
                 f"[{_MIN_METADATA_SCORE_BOUND}, {_MAX_METADATA_SCORE_BOUND}]"
             )
         return self
+
+
+class OpenAIReasoningSettings(BaseSettings):
+    """Spec G2D2 section 10: whether the optional OpenAI reasoning tutor
+    adapter is available as a secondary provider through
+    `TutorModelRouter`.
+
+    `openai_reasoning_enabled=False` (the default) is the safe,
+    rollback-neutral setting - deploying this code alone must not change
+    existing behavior: `TutorModelRouter` is only ever constructed with
+    a real `OpenAIReasoningTutorAdapter` and `secondary_enabled=True`
+    when this flag is explicitly turned on, and even then every complex-
+    question or Ollama-failure route still falls back to Ollama rather
+    than ever leaving a learner ungrounded. No API key is ever logged,
+    persisted, exposed to the frontend, or placed into
+    `LearningCoachGraphState`."""
+
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    openai_reasoning_enabled: bool = False
+    openai_api_key: str = ""
+    openai_reasoning_model: str = ""
+    openai_reasoning_timeout_seconds: float = 45.0
+    openai_reasoning_max_attempts: int = 1
+    openai_reasoning_max_output_tokens: int = 2000
+
+    @model_validator(mode="after")
+    def _validate_when_enabled(self) -> "OpenAIReasoningSettings":
+        if self.openai_reasoning_enabled:
+            if not self.openai_api_key:
+                raise ValueError("openai_api_key is required when openai_reasoning_enabled=true")
+            if not self.openai_reasoning_model:
+                raise ValueError("openai_reasoning_model is required when openai_reasoning_enabled=true")
+        return self
+
+
+class HebrewQueryBridgeSettings(BaseSettings):
+    """Spec G2D2 section 6: whether the shared EN/HE language bridge
+    translates a Hebrew question into a bounded English retrieval query
+    before Tutor knowledge retrieval.
+
+    `hebrew_query_bridge_enabled=False` (the default) is the safe,
+    rollback-neutral setting - deploying this code alone must not change
+    existing behavior. When disabled, `GroundedAITutorService` never
+    calls the translation adapter and every Hebrew question is retrieved
+    with its own (untranslated) text, exactly as before this phase."""
+
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    hebrew_query_bridge_enabled: bool = False

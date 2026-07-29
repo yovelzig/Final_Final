@@ -41,8 +41,8 @@ def _thread(**overrides) -> LearningOrchestratorThread:
 
 def _run(**overrides) -> LearningOrchestratorRun:
     defaults = dict(
-        thread_id=uuid4(), learner_id=uuid4(), idempotency_key="key-1", correlation_id="corr-1",
-        graph_version="learning-coach-graph-v1",
+        thread_id=uuid4(), learner_id=uuid4(), trusted_account_id=uuid4(), idempotency_key="key-1",
+        correlation_id="corr-1", graph_version="learning-coach-graph-v1",
     )
     defaults.update(overrides)
     return LearningOrchestratorRun(**defaults)
@@ -97,6 +97,23 @@ def test_run_waiting_for_learner_requires_waiting_at() -> None:
 def test_run_succeeded_requires_completed_at() -> None:
     with pytest.raises(ValidationError, match="completed_at"):
         _run(status=LearningOrchestratorRunStatus.SUCCEEDED, started_at=NOW)
+
+
+def test_run_waiting_for_research_requires_waiting_at() -> None:
+    with pytest.raises(ValidationError, match="waiting_at"):
+        _run(status=LearningOrchestratorRunStatus.WAITING_FOR_RESEARCH, research_job_id=uuid4())
+
+
+def test_run_waiting_for_research_requires_research_job_id() -> None:
+    with pytest.raises(ValidationError, match="research_job_id"):
+        _run(status=LearningOrchestratorRunStatus.WAITING_FOR_RESEARCH, waiting_at=NOW)
+
+
+def test_run_waiting_for_research_is_valid_with_both_fields() -> None:
+    run = _run(status=LearningOrchestratorRunStatus.WAITING_FOR_RESEARCH, waiting_at=NOW, research_job_id=uuid4())
+    assert run.status == LearningOrchestratorRunStatus.WAITING_FOR_RESEARCH
+    assert run.research_request_id is None
+    assert run.research_run_id is None
 
 
 def test_run_failed_requires_sanitized_failure_fields() -> None:
