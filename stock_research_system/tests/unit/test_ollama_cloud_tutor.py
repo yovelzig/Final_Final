@@ -280,6 +280,57 @@ class TestCorrectionRetry:
             await adapter.generate(_request())
         assert len(captured) == 2
 
+    async def test_extra_top_level_key_is_rejected(self) -> None:
+        body = {
+            "model": "gpt-oss:20b",
+            "message": {
+                "role": "assistant",
+                "content": json.dumps(
+                    {"answer_markdown": "x", "cited_chunk_ids": [], "extra_field": "unexpected"}
+                ),
+            },
+        }
+        bad = httpx.Response(200, json=body)
+        client, captured = _client_for([bad, bad])
+        adapter = _make_adapter(client)
+
+        with pytest.raises(TutorModelProviderError):
+            await adapter.generate(_request())
+        assert len(captured) == 2
+
+    async def test_oversized_cited_chunk_ids_list_is_rejected(self) -> None:
+        candidate = _candidate()
+        oversized_ids = [str(candidate.chunk.chunk_id)] * 51
+        bad = _ollama_response(cited_ids=oversized_ids)
+        client, captured = _client_for([bad, bad])
+        adapter = _make_adapter(client)
+
+        with pytest.raises(TutorModelProviderError):
+            await adapter.generate(_request(candidates=[candidate]))
+        assert len(captured) == 2
+
+    async def test_oversized_answer_markdown_is_rejected(self) -> None:
+        bad = _ollama_response(answer="x" * 20_001)
+        client, captured = _client_for([bad, bad])
+        adapter = _make_adapter(client)
+
+        with pytest.raises(TutorModelProviderError):
+            await adapter.generate(_request())
+        assert len(captured) == 2
+
+    async def test_citations_are_never_inferred_from_prose(self) -> None:
+        """A UUID-looking string embedded in the free-text answer must
+        never become a citation - only the structured `cited_chunk_ids`
+        field is ever read for citations."""
+        candidate = _candidate()
+        prose_with_uuid = f"See chunk {candidate.chunk.chunk_id} for details."
+        client, _ = _client_for([_ollama_response(answer=prose_with_uuid, cited_ids=[])])
+        adapter = _make_adapter(client)
+
+        result = await adapter.generate(_request(candidates=[candidate]))
+
+        assert result.cited_chunk_ids == []
+
 
 class TestTransportRetries:
     async def test_timeout_retries_are_bounded_then_raise(self) -> None:

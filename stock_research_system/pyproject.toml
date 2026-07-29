@@ -51,6 +51,15 @@ dev = [
 ai_tutor = [
     "sentence-transformers>=3,<4"
 ]
+# The OpenAI SDK dependency of `infrastructure/ai_tutor/openai_reasoning_tutor.py`
+# (OPENAI_REASONING_ENABLED, defaults false) and the Live Research grounded
+# synthesis router. Kept as its own small extra - separate from
+# `quality_evaluation` below - so production images (finquest-api,
+# finquest-worker-coach) can install the OpenAI client without pulling in
+# ragas/langchain-community.
+openai = [
+    "openai>=1,<2"
+]
 langsmith = [
     "langsmith>=0.2,<1"
 ]

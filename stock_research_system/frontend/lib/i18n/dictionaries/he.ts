@@ -283,6 +283,10 @@ export const he = {
     approve: "אשר",
     notNow: "לא עכשיו",
     continueLabel: "המשך",
+    researchStarted: "בודקים את זה עבורכם…",
+    researchWaiting: "עדיין חוקרים… זה עשוי לקחת דקה.",
+    researchTimedOut: "זה לוקח יותר זמן מהצפוי. בדקו שוב בעוד זמן קצר.",
+    researchFailed: "לא ניתן היה להשלים את הבקשה. נסו שוב.",
   },
   emptyState: {
     genericTitle: "אין כאן עדיין כלום",

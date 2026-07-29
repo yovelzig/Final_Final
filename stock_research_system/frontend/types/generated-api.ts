@@ -3065,7 +3065,7 @@ export interface components {
          * LearningOrchestratorRunStatus
          * @enum {string}
          */
-        LearningOrchestratorRunStatus: "CREATED" | "RUNNING" | "WAITING_FOR_LEARNER" | "SUCCEEDED" | "FAILED" | "CANCELLED" | "EXPIRED";
+        LearningOrchestratorRunStatus: "CREATED" | "RUNNING" | "WAITING_FOR_LEARNER" | "WAITING_FOR_RESEARCH" | "SUCCEEDED" | "FAILED" | "CANCELLED" | "EXPIRED";
         /**
          * LearningOrchestratorThreadStatus
          * @enum {string}

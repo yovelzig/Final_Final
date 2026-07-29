@@ -170,7 +170,7 @@ class PersonalizedLearningOrchestratorService:
         return run
 
     async def _create_run_row(
-        self, *, learner_id: UUID, thread_id: UUID, idempotency_key: str,
+        self, *, learner_id: UUID, trusted_account_id: UUID, thread_id: UUID, idempotency_key: str,
     ) -> tuple[LearningOrchestratorRun, bool]:
         """Returns `(run, created)` - `created=False` means an existing run
         for this idempotency key was returned instead of a new one."""
@@ -187,7 +187,8 @@ class PersonalizedLearningOrchestratorService:
                 return existing, False
 
             run = LearningOrchestratorRun(
-                thread_id=thread_id, learner_id=learner_id, idempotency_key=idempotency_key,
+                thread_id=thread_id, learner_id=learner_id, trusted_account_id=trusted_account_id,
+                idempotency_key=idempotency_key,
                 correlation_id=str(uuid4()), graph_version=self._graph_version, maximum_steps=self._max_steps,
             )
             created_run = await uow.learning_orchestrator_runs.create(run)
@@ -201,11 +202,12 @@ class PersonalizedLearningOrchestratorService:
             return created_run, True
 
     async def start_run(
-        self, *, learner_id: UUID, thread_id: UUID, user_input: str, idempotency_key: str,
+        self, *, learner_id: UUID, trusted_account_id: UUID, thread_id: UUID, user_input: str, idempotency_key: str,
         context_references: dict[str, str] | None = None,
     ) -> LearningOrchestratorRun:
         run, created = await self._create_run_row(
-            learner_id=learner_id, thread_id=thread_id, idempotency_key=idempotency_key
+            learner_id=learner_id, trusted_account_id=trusted_account_id, thread_id=thread_id,
+            idempotency_key=idempotency_key,
         )
         if not created:
             return run
@@ -215,6 +217,7 @@ class PersonalizedLearningOrchestratorService:
 
         initial_state = new_state(
             thread_id=str(thread_id), run_id=str(run.run_id), learner_id=str(learner_id),
+            trusted_account_id=str(trusted_account_id),
             correlation_id=run.correlation_id, graph_version=self._graph_version, user_input=user_input,
             requested_context_type=thread.current_context_type.value, context_references=context_references,
             maximum_steps=self._max_steps,
@@ -228,19 +231,20 @@ class PersonalizedLearningOrchestratorService:
                     async with self._tracing.start_span(
                         "learning_coach.run", attributes={"thread_id": str(thread_id), "run_id": str(run.run_id)}
                     ):
-                        final_state, is_waiting = await self._graph_runtime.start_run(
+                        final_state, interrupt_reason = await self._graph_runtime.start_run(
                             thread_id=str(thread_id), run_id=str(run.run_id), initial_state=initial_state
                         )
             except Exception as exc:  # noqa: BLE001 - converted into a durable, sanitized FAILED run
                 return await self._mark_failed(run.run_id, exc)
-            return await self._finalize_run(run.run_id, final_state, is_waiting=is_waiting)
+            return await self._finalize_run(run.run_id, final_state, interrupt_reason=interrupt_reason)
 
     async def stream_start_run(
-        self, *, learner_id: UUID, thread_id: UUID, user_input: str, idempotency_key: str,
+        self, *, learner_id: UUID, trusted_account_id: UUID, thread_id: UUID, user_input: str, idempotency_key: str,
         context_references: dict[str, str] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         run, created = await self._create_run_row(
-            learner_id=learner_id, thread_id=thread_id, idempotency_key=idempotency_key
+            learner_id=learner_id, trusted_account_id=trusted_account_id, thread_id=thread_id,
+            idempotency_key=idempotency_key,
         )
         if not created:
             yield {"type": "run_completed", "run_id": str(run.run_id), "status": run.status.value}
@@ -251,6 +255,7 @@ class PersonalizedLearningOrchestratorService:
 
         initial_state = new_state(
             thread_id=str(thread_id), run_id=str(run.run_id), learner_id=str(learner_id),
+            trusted_account_id=str(trusted_account_id),
             correlation_id=run.correlation_id, graph_version=self._graph_version, user_input=user_input,
             requested_context_type=thread.current_context_type.value, context_references=context_references,
             maximum_steps=self._max_steps,
@@ -270,6 +275,34 @@ class PersonalizedLearningOrchestratorService:
         ):
             yield event
 
+    async def resume_from_research(self, *, run_id: UUID, resume_value: dict[str, Any]) -> LearningOrchestratorRun:
+        """Resumes a run paused at the `await_research_result` interrupt
+        (spec G2D2 section 11), driven by `CoachResearchResumeJobHandler`
+        rather than a learner action - so, unlike `resume_run`, there is
+        no `LearningApprovalRequest`/`_validate_and_record_approval` step
+        here: the handler has already done its own verification (spec
+        section 16) before calling this. `resume_value` must contain
+        outcome metadata only (never raw evidence - the resumed graph
+        node reloads verified evidence from PostgreSQL itself)."""
+        async with self._unit_of_work_factory() as uow:
+            run = await uow.learning_orchestrator_runs.get_by_id(run_id)
+        if run is None:
+            raise LearningOrchestratorRunNotFoundError(f"No learning-coach run found with id '{run_id}'.")
+
+        async with self._run_lock(thread_id=run.thread_id, run_id=run.run_id):
+            try:
+                with self._metrics.time_operation("finquest_learning_coach_run_duration_seconds"):
+                    async with self._tracing.start_span(
+                        "learning_coach.resume_from_research",
+                        attributes={"thread_id": str(run.thread_id), "run_id": str(run_id)},
+                    ):
+                        final_state, interrupt_reason = await self._graph_runtime.resume_run(
+                            thread_id=str(run.thread_id), run_id=str(run_id), resume_value=resume_value
+                        )
+            except Exception as exc:  # noqa: BLE001
+                return await self._mark_failed(run_id, exc)
+            return await self._finalize_run(run_id, final_state, interrupt_reason=interrupt_reason)
+
     async def resume_run(self, *, learner_id: UUID, run_id: UUID, approval: LearningApprovalRequest) -> LearningOrchestratorRun:
         run, resume_value = await self._validate_and_record_approval(learner_id=learner_id, run_id=run_id, approval=approval)
         if resume_value is None:
@@ -284,12 +317,12 @@ class PersonalizedLearningOrchestratorService:
                     async with self._tracing.start_span(
                         "learning_coach.resume", attributes={"thread_id": str(run.thread_id), "run_id": str(run_id)}
                     ):
-                        final_state, is_waiting = await self._graph_runtime.resume_run(
+                        final_state, interrupt_reason = await self._graph_runtime.resume_run(
                             thread_id=str(run.thread_id), run_id=str(run_id), resume_value=resume_value
                         )
             except Exception as exc:  # noqa: BLE001
                 return await self._mark_failed(run_id, exc)
-            return await self._finalize_run(run_id, final_state, is_waiting=is_waiting)
+            return await self._finalize_run(run_id, final_state, interrupt_reason=interrupt_reason)
 
     async def stream_resume_run(
         self, *, learner_id: UUID, run_id: UUID, approval: LearningApprovalRequest
@@ -386,7 +419,7 @@ class PersonalizedLearningOrchestratorService:
             await uow.commit()
 
     async def _finalize_run(
-        self, run_id: UUID, final_state: dict[str, Any], *, is_waiting: bool
+        self, run_id: UUID, final_state: dict[str, Any], *, interrupt_reason: str | None
     ) -> LearningOrchestratorRun:
         step_count = final_state.get("step_count", 0)
         intent = (final_state.get("intent_classification") or {}).get("intent")
@@ -394,9 +427,23 @@ class PersonalizedLearningOrchestratorService:
 
         async with self._unit_of_work_factory() as uow:
             await uow.learning_orchestrator_runs.update_progress(run_id, step_count=step_count, intent=intent, route=route)
-            if is_waiting:
+            if interrupt_reason == "approval":
                 updated = await uow.learning_orchestrator_runs.mark_waiting_for_learner(run_id, waiting_at=self._clock())
-                self._metrics.increment_counter("finquest_learning_coach_interrupts_total")
+                self._metrics.increment_counter("finquest_learning_coach_interrupts_total", labels={"reason": "approval"})
+            elif interrupt_reason == "research":
+                # `request_live_research` (nodes.py) already wrote
+                # WAITING_FOR_RESEARCH - and research_job_id/
+                # research_deadline_at - directly before the graph
+                # interrupted at `await_research_result`. The finalizer
+                # must not overwrite that row here; it only reads the
+                # current one back so callers get a consistent return
+                # value. Resumption is driven entirely by
+                # `resume_from_research` (via `COACH_RESEARCH_RESUME`),
+                # never by this finalizer.
+                updated = await uow.learning_orchestrator_runs.get_by_id(run_id)
+                if updated is None:
+                    raise LearningOrchestratorRunNotFoundError(f"No learning-coach run found with id '{run_id}'.")
+                self._metrics.increment_counter("finquest_learning_coach_interrupts_total", labels={"reason": "research"})
             else:
                 proposed_action = final_state.get("proposed_action")
                 updated = await uow.learning_orchestrator_runs.mark_succeeded(
@@ -442,7 +489,7 @@ class PersonalizedLearningOrchestratorService:
     async def _stream_and_finalize(
         self, *, thread_id: UUID, run_id: UUID, stream_factory: Callable[[], AsyncIterator[dict[str, Any]]],
     ) -> AsyncIterator[dict[str, Any]]:
-        is_waiting = False
+        interrupt_reason: str | None = None
         final_state: dict[str, Any] = {}
         try:
             async with self._run_lock(thread_id=thread_id, run_id=run_id):
@@ -452,7 +499,9 @@ class PersonalizedLearningOrchestratorService:
                 try:
                     async for event in stream:
                         if event.get("type") == "approval_required":
-                            is_waiting = True
+                            interrupt_reason = "approval"
+                        if event.get("type") == "research_waiting_update":
+                            interrupt_reason = "research"
                         if event.get("type") == "intent":
                             final_state["intent_classification"] = {"intent": event.get("intent")}
                         if event.get("type") == "route":
@@ -472,4 +521,4 @@ class PersonalizedLearningOrchestratorService:
         state_snapshot = await self._graph_runtime.get_state(thread_id=str(thread_id))
         if state_snapshot is not None:
             final_state = state_snapshot
-        await self._finalize_run(run_id, final_state, is_waiting=is_waiting)
+        await self._finalize_run(run_id, final_state, interrupt_reason=interrupt_reason)

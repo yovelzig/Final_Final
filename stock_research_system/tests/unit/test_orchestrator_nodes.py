@@ -45,7 +45,8 @@ def _nodes(*, uow_factory=None, context_loader=None, action_executor=None) -> Gr
 
 def _state(user_input: str, **overrides):
     state = new_state(
-        thread_id=str(uuid4()), run_id=str(uuid4()), learner_id=str(uuid4()), correlation_id=str(uuid4()),
+        thread_id=str(uuid4()), run_id=str(uuid4()), learner_id=str(uuid4()), trusted_account_id=str(uuid4()),
+        correlation_id=str(uuid4()),
         graph_version="learning-coach-graph-v1", user_input=user_input, requested_context_type="GENERAL_EDUCATION",
     )
     state.update(overrides)
@@ -137,6 +138,27 @@ async def test_persist_final_result_appends_a_run_completed_event() -> None:
     state = _state("hi")
     await nodes.persist_final_result(state)
     assert any(e.event_type.value == "RUN_COMPLETED" for e in events.events)
+
+
+async def test_persist_final_result_carries_the_final_response_in_event_metadata() -> None:
+    """G2D2/H1 correction pass, section 3: a frontend that polls `GET
+    /runs/{run_id}/events` after the original SSE connection closed must
+    be able to render the resumed answer from this event alone."""
+    events = FakeEventRepo()
+    uow = FakeUnitOfWork(events=events)
+    nodes = _nodes(uow_factory=lambda: uow)
+    state = _state(
+        "hi",
+        final_response={
+            "answer_markdown": "Nvidia reported strong earnings.", "citations": [{"citation_number": 1}],
+            "grounding_status": "GROUNDED", "navigation_target": None,
+        },
+    )
+    await nodes.persist_final_result(state)
+    run_completed = next(e for e in events.events if e.event_type.value == "RUN_COMPLETED")
+    assert run_completed.metadata["answer_markdown"] == "Nvidia reported strong earnings."
+    assert run_completed.metadata["citations"] == [{"citation_number": 1}]
+    assert run_completed.metadata["grounding_status"] == "GROUNDED"
 
 
 async def test_build_action_proposal_is_idempotent_for_the_same_run() -> None:

@@ -39,55 +39,24 @@ from stock_research_core.api.routers import (
     virtual_portfolios,
 )
 from stock_research_core.api.settings import ApiSettings, AuthSettings
-from stock_research_core.application.adaptive_learning.policies import (
-    DeterministicReviewSchedulingPolicy,
-    RuleBasedAdaptivePolicy,
-    RuleBasedDiagnosticPolicy,
-    RuleBasedDifficultyPolicy,
-)
-from stock_research_core.application.adaptive_learning.service import AdaptiveLearningService
 from stock_research_core.application.ai_tutor.chunking import HeadingAwareWordChunker
-from stock_research_core.application.ai_tutor.guardrails import RuleBasedTutorGuardrail
-from stock_research_core.application.ai_tutor.lesson_tutor import LessonTutorService
-from stock_research_core.application.ai_tutor.portfolio_tutor import PortfolioTutorService
-from stock_research_core.application.ai_tutor.ports import KnowledgeSufficiencyGatePort, TutorModelPort
-from stock_research_core.application.ai_tutor.prompt_builder import GroundedTutorPromptBuilder
-from stock_research_core.application.ai_tutor.retrieval import HybridKnowledgeRetriever
-from stock_research_core.application.ai_tutor.scenario_tutor import ScenarioTutorService
-from stock_research_core.application.ai_tutor.service import GroundedAITutorService
-from stock_research_core.application.ai_tutor.sufficiency import (
-    DisabledKnowledgeSufficiencyGate,
-    RuleBasedKnowledgeSufficiencyGate,
-)
-from stock_research_core.application.learning.service import LearningService
-from stock_research_core.application.learning_orchestrator.actions import AllowlistedLearningActionExecutor
-from stock_research_core.application.learning_orchestrator.graph_builder import build_graph
-from stock_research_core.application.learning_orchestrator.intent import RuleBasedLearningIntentClassifier
-from stock_research_core.application.learning_orchestrator.nodes import GraphNodes, NodeDependencies
-from stock_research_core.application.learning_orchestrator.service import PersonalizedLearningOrchestratorService
-from stock_research_core.application.learning_orchestrator.subgraphs import Subgraphs, SubgraphDependencies
-from stock_research_core.application.market_scenarios.grading import RuleBasedScenarioGradingPolicy
-from stock_research_core.application.market_scenarios.service import HistoricalMarketScenarioService
+from stock_research_core.application.learning_orchestrator.nodes import LiveResearchTriggerDependencies
 from stock_research_core.application.operations.service import BackgroundJobService
-from stock_research_core.domain.models import utc_now
-from stock_research_core.application.virtual_portfolio.execution import (
-    AverageCostPortfolioAccountingPolicy,
-    NextAvailableOpenExecutionPolicy,
-)
-from stock_research_core.application.virtual_portfolio.feedback import RuleBasedPortfolioFeedbackPolicy
-from stock_research_core.application.virtual_portfolio.service import VirtualPortfolioService
-from stock_research_core.application.virtual_portfolio.valuation_service import PortfolioValuationService
 from stock_research_core.infrastructure.ai_tutor.config import (
     EmbeddingSettings,
+    HebrewQueryBridgeSettings,
     KnowledgeSufficiencySettings,
+    OpenAIReasoningSettings,
     TutorModelSettings,
 )
 from stock_research_core.infrastructure.ai_tutor.deterministic_fake_embeddings import (
     DeterministicFakeEmbeddingAdapter,
 )
-from stock_research_core.infrastructure.ai_tutor.extractive_tutor import DeterministicExtractiveTutor
-from stock_research_core.infrastructure.ai_tutor.ollama_cloud_tutor import OllamaCloudTutorAdapter
-from stock_research_core.infrastructure.ai_tutor.openai_compatible_tutor import OpenAICompatibleTutorAdapter
+from stock_research_core.infrastructure.ai_tutor.model_factory import (
+    build_knowledge_sufficiency_gate,
+    build_tutor_model,
+    close_tutor_model,
+)
 from stock_research_core.infrastructure.ai_tutor.production_safety import (
     assert_embedding_provider_production_safe,
 )
@@ -106,19 +75,25 @@ from stock_research_core.infrastructure.identity.opaque_refresh_token_service im
 from stock_research_core.infrastructure.language.composition import build_language_service, close_language_service
 from stock_research_core.infrastructure.language.config import LanguageServiceSettings
 from stock_research_core.infrastructure.learning_orchestrator.config import LangGraphSettings
-from stock_research_core.infrastructure.learning_orchestrator.context_loader import SqlAlchemyLearningContextLoader
-from stock_research_core.infrastructure.learning_orchestrator.graph_runtime import LangGraphOrchestratorRuntime
-from stock_research_core.infrastructure.learning_orchestrator.langsmith_tracing import configure_langsmith_tracing
-from stock_research_core.infrastructure.learning_orchestrator.optional_model_intent_classifier import (
-    HttpIntentClassificationModelClient,
-    ModelAssistedLearningIntentClassifier,
+from stock_research_core.infrastructure.learning_orchestrator.runtime_factory import (
+    build_learning_orchestrator_runtime,
 )
-from stock_research_core.infrastructure.learning_orchestrator.postgres_checkpointer import (
-    build_checkpointer,
-    build_checkpointer_pool,
-    to_psycopg_conninfo,
+from stock_research_core.infrastructure.live_research.config import (
+    LiveResearchAccountLimitSettings,
+    PerplexitySearchSettings,
+    ResearchModelSettings,
+    SecEdgarSettings,
 )
-from stock_research_core.infrastructure.market_scenarios.pandas_scenario_calculator import PandasScenarioCalculator
+from stock_research_core.infrastructure.live_research.redis_account_rate_limiter import (
+    RedisAccountResearchLimiter,
+)
+from stock_research_core.infrastructure.live_research.research_model_factory import (
+    build_research_model,
+    close_research_model,
+)
+from stock_research_core.infrastructure.live_research.sec_company_ticker_resolver import (
+    SecCompanyTickerResolver,
+)
 from stock_research_core.infrastructure.operations.celery_app import celery_app as _celery_app
 from stock_research_core.infrastructure.operations.celery_queue import CeleryJobQueue
 from stock_research_core.infrastructure.operations.config import OperationsSettings, ProxySettings
@@ -130,7 +105,6 @@ from stock_research_core.infrastructure.operations.registry_factory import (
 )
 from stock_research_core.infrastructure.operations.structured_logging import configure_structlog
 from stock_research_core.infrastructure.operations.tracing import build_tracing
-from stock_research_core.infrastructure.virtual_portfolio.pandas_portfolio_analytics import PandasPortfolioAnalytics
 
 
 def _build_embedding_provider(settings: EmbeddingSettings):
@@ -142,55 +116,10 @@ def _build_embedding_provider(settings: EmbeddingSettings):
     )
 
 
-def _build_tutor_model(settings: TutorModelSettings) -> TutorModelPort:
-    if settings.tutor_model_provider == "extractive":
-        return DeterministicExtractiveTutor()
-    if settings.tutor_model_provider == "openai_compatible":
-        return OpenAICompatibleTutorAdapter(
-            base_url=settings.tutor_model_base_url, api_key=settings.tutor_model_api_key,
-            model_name=settings.tutor_model_name, timeout_seconds=settings.tutor_model_timeout_seconds,
-        )
-    if settings.tutor_model_provider == "ollama_cloud":
-        return OllamaCloudTutorAdapter(
-            base_url=settings.tutor_model_base_url, api_key=settings.tutor_model_api_key,
-            model_name=settings.tutor_model_name, timeout_seconds=settings.tutor_model_timeout_seconds,
-            thinking_level=settings.tutor_model_thinking_level,
-        )
-    # `TutorModelSettings`'s own validator already rejects any other value at
-    # construction time - this branch only guards against a future settings
-    # change that weakens that validation, never silently falling back to
-    # `extractive`.
-    raise ValueError(f"Unsupported tutor_model_provider {settings.tutor_model_provider!r}")
-
-
-def _build_knowledge_sufficiency_gate(
-    settings: KnowledgeSufficiencySettings,
-) -> KnowledgeSufficiencyGatePort:
-    """The one place the enabled/disabled choice is made - Phase E1's
-    `TUTOR_KNOWLEDGE_SUFFICIENCY_GATE_ENABLED=false` default (and
-    production's current value) means this always returns the explicit
-    `DisabledKnowledgeSufficiencyGate`, so deploying this feature's
-    code alone never changes `GroundedAITutorService`'s existing
-    behavior."""
-    if not settings.tutor_knowledge_sufficiency_gate_enabled:
-        return DisabledKnowledgeSufficiencyGate()
-    return RuleBasedKnowledgeSufficiencyGate(
-        minimum_vector_score=settings.tutor_knowledge_sufficiency_min_vector_score,
-        minimum_lexical_score=settings.tutor_knowledge_sufficiency_min_lexical_score,
-        minimum_context_metadata_score=settings.tutor_knowledge_sufficiency_min_context_metadata_score,
-    )
-
-
-async def _close_tutor_model(tutor_model: TutorModelPort) -> None:
-    """Closes an HTTP-backed tutor adapter's own client on shutdown.
-
-    `DeterministicExtractiveTutor` owns no client and is left alone. Each
-    HTTP adapter's own `aclose()` only closes a client it constructed itself
-    (`_owns_client`) - a client the caller injected is never closed here or
-    inside the adapter.
-    """
-    if isinstance(tutor_model, (OpenAICompatibleTutorAdapter, OllamaCloudTutorAdapter)):
-        await tutor_model.aclose()
+#: `build_tutor_model`/`build_knowledge_sufficiency_gate`/`close_tutor_model`
+#: now live in `infrastructure.ai_tutor.model_factory`, shared verbatim
+#: with `infrastructure.operations.celery_tasks`'s coach-worker
+#: composition (spec G2D2) - imported above, not redefined here.
 
 
 def create_app(
@@ -205,6 +134,11 @@ def create_app(
     operations_settings: OperationsSettings | None = None,
     proxy_settings: ProxySettings | None = None,
     learning_orchestrator_settings: LangGraphSettings | None = None,
+    openai_reasoning_settings: OpenAIReasoningSettings | None = None,
+    hebrew_query_bridge_settings: HebrewQueryBridgeSettings | None = None,
+    live_research_account_limit_settings: LiveResearchAccountLimitSettings | None = None,
+    live_research_perplexity_settings: PerplexitySearchSettings | None = None,
+    live_research_sec_settings: SecEdgarSettings | None = None,
     testing: bool = False,
 ) -> FastAPI:
     api_settings = api_settings or ApiSettings()
@@ -217,6 +151,11 @@ def create_app(
     operations_settings = operations_settings or OperationsSettings()
     learning_orchestrator_settings = learning_orchestrator_settings or LangGraphSettings()
     proxy_settings = proxy_settings or ProxySettings()
+    openai_reasoning_settings = openai_reasoning_settings or OpenAIReasoningSettings()
+    hebrew_query_bridge_settings = hebrew_query_bridge_settings or HebrewQueryBridgeSettings()
+    live_research_account_limit_settings = live_research_account_limit_settings or LiveResearchAccountLimitSettings()
+    live_research_perplexity_settings = live_research_perplexity_settings or PerplexitySearchSettings()
+    live_research_sec_settings = live_research_sec_settings or SecEdgarSettings()
 
     auth_settings.require_strong_secret(testing=testing)
     if testing and not auth_settings.auth_jwt_secret:
@@ -256,7 +195,9 @@ def create_app(
         app.state.embedding_settings = embedding_settings
         app.state.embedding_provider = _build_embedding_provider(embedding_settings)
         app.state.chunker = HeadingAwareWordChunker()
-        app.state.tutor_model = _build_tutor_model(tutor_model_settings)
+        app.state.tutor_model = build_tutor_model(
+            tutor_model_settings, openai_reasoning_settings=openai_reasoning_settings
+        )
         app.state.knowledge_sufficiency_settings = knowledge_sufficiency_settings
         app.state.knowledge_sufficiency_gate = _build_knowledge_sufficiency_gate(knowledge_sufficiency_settings)
         app.state.language_service_settings = language_service_settings
@@ -273,6 +214,22 @@ def create_app(
         redis_client = build_redis_client(operations_settings.redis_url)
         app.state.redis_client = redis_client
         app.state.celery_app_instance = _celery_app
+        # Spec G2D2/H1 correction pass, section 8: constructed once and
+        # shared by both `background_job_service` (whose
+        # `_maybe_create_coach_resume_job` releases the per-account
+        # concurrency slot once a Coach-triggered LIVE_RESEARCH_RUN_
+        # EXECUTION job goes terminal) and `live_research_deps` (which
+        # acquires that same slot) below - the two must never be
+        # independently-configured instances. Reuses this function's own
+        # `live_research_account_limit_settings` parameter/default
+        # (resolved above), never a second, independently-constructed
+        # `LiveResearchAccountLimitSettings()`.
+        account_research_rate_limiter = RedisAccountResearchLimiter(
+            redis_client=redis_client,
+            concurrent_limit=live_research_account_limit_settings.live_research_per_account_concurrent_limit,
+            hourly_limit=live_research_account_limit_settings.live_research_per_account_hourly_limit,
+            concurrent_window_seconds=LiveResearchTriggerDependencies.research_deadline_seconds,
+        )
         metrics = PrometheusMetrics() if operations_settings.metrics_enabled else NoOpMetrics()
         app.state.metrics = metrics
         tracing = build_tracing(
@@ -288,7 +245,7 @@ def create_app(
         app.state.background_job_service = BackgroundJobService(
             unit_of_work_factory=app.state.uow_factory, job_registry=registry,
             job_queue=CeleryJobQueue(_celery_app), lock_port=RedisDistributedLock(redis_client),
-            metrics=metrics, tracing=tracing,
+            metrics=metrics, tracing=tracing, account_research_rate_limiter=account_research_rate_limiter,
         )
 
         # -- Phase 13: quality-evaluation platform -----------------------------------------------
@@ -301,122 +258,63 @@ def create_app(
         # -- Phase 12: LangGraph learning coach -----------------------------------------------
         # Entirely opt-in: `LANGGRAPH_ENABLED=false` (the default) means no
         # checkpointer pool is opened and no graph is compiled - every
-        # existing Phase 1-11 capability is completely unaffected.
+        # existing Phase 1-11 capability is completely unaffected. Spec
+        # G2D2: composition now lives in `build_learning_orchestrator_runtime`,
+        # shared verbatim with `finquest-worker-coach` and the
+        # graph-validation CLI, rather than duplicated in each process.
         app.state.learning_orchestrator_settings = learning_orchestrator_settings
-        app.state.learning_orchestrator_service = None
-        app.state.learning_orchestrator_checkpointer_pool = None
-        checkpointer_pool = None
-        intent_model_client: HttpIntentClassificationModelClient | None = None
-        if learning_orchestrator_settings.langgraph_enabled:
-            configure_langsmith_tracing(
-                enabled=learning_orchestrator_settings.langsmith_tracing,
-                api_key=learning_orchestrator_settings.langsmith_api_key,
-                project=learning_orchestrator_settings.langsmith_project,
-                trace_content=learning_orchestrator_settings.langsmith_trace_content,
-            )
 
-            checkpointer_pool = build_checkpointer_pool(
-                to_psycopg_conninfo(database_settings.database_url),
-                min_size=learning_orchestrator_settings.langgraph_checkpointer_pool_min_size,
-                max_size=learning_orchestrator_settings.langgraph_checkpointer_pool_max_size,
+        # Spec G2D2 section 5/11/18: `LiveResearchTriggerDependencies` is
+        # always constructed (the account rate limiter and background job
+        # service are cheap, connection-less objects), but `enabled` only
+        # becomes `True` when the full flag chain is satisfied - every
+        # graph node that reads `NodeDependencies.live_research` already
+        # treats `enabled=False` exactly like the field being `None`, so
+        # this is a safe, rollback-neutral default identical to every
+        # other Phase 11 flag in this file.
+        live_research_route_enabled = (
+            learning_orchestrator_settings.langgraph_enabled
+            and learning_orchestrator_settings.langgraph_live_research_route_enabled
+            and operations_settings.live_research_jobs_enabled
+            and (
+                live_research_perplexity_settings.live_research_perplexity_enabled
+                or live_research_sec_settings.live_research_sec_enabled
             )
-            await checkpointer_pool.open()
-            app.state.learning_orchestrator_checkpointer_pool = checkpointer_pool
-            checkpointer = build_checkpointer(checkpointer_pool)
-
-            retriever = HybridKnowledgeRetriever(
-                unit_of_work_factory=app.state.uow_factory, embedding_provider=app.state.embedding_provider
-            )
-            tutor_service = GroundedAITutorService(
-                unit_of_work_factory=app.state.uow_factory,
-                retriever=retriever,
-                tutor_model=app.state.tutor_model, guardrail=RuleBasedTutorGuardrail(),
-                prompt_builder=GroundedTutorPromptBuilder(),
-                sufficiency_gate=app.state.knowledge_sufficiency_gate,
-                language_service=app.state.language_service,
-                language_service_enabled=app.state.language_service_enabled,
-            )
-            lesson_tutor_service = LessonTutorService(
-                tutor_service=tutor_service, unit_of_work_factory=app.state.uow_factory
-            )
-            scenario_service = HistoricalMarketScenarioService(
-                unit_of_work_factory=app.state.uow_factory, scenario_calculator=PandasScenarioCalculator(),
-                scenario_grading_policy=RuleBasedScenarioGradingPolicy(),
-                graded_answer_submitter=LearningService(app.state.uow_factory),
-            )
-            scenario_tutor_service = ScenarioTutorService(
-                tutor_service=tutor_service, unit_of_work_factory=app.state.uow_factory,
-                scenario_service=scenario_service,
-            )
-            portfolio_service = VirtualPortfolioService(
-                unit_of_work_factory=app.state.uow_factory, execution_policy=NextAvailableOpenExecutionPolicy(),
-                accounting_policy=AverageCostPortfolioAccountingPolicy(),
-            )
-            valuation_service = PortfolioValuationService(
-                unit_of_work_factory=app.state.uow_factory, analytics=PandasPortfolioAnalytics(),
-                feedback_policy=RuleBasedPortfolioFeedbackPolicy(),
-            )
-            portfolio_tutor_service = PortfolioTutorService(
-                tutor_service=tutor_service, unit_of_work_factory=app.state.uow_factory,
-                portfolio_service=portfolio_service, valuation_service=valuation_service,
-            )
-            adaptive_learning_service = AdaptiveLearningService(
-                app.state.uow_factory, adaptive_policy=RuleBasedAdaptivePolicy(),
-                difficulty_policy=RuleBasedDifficultyPolicy(), review_policy=DeterministicReviewSchedulingPolicy(),
-                diagnostic_policy=RuleBasedDiagnosticPolicy(),
-            )
-            context_loader = SqlAlchemyLearningContextLoader(
-                unit_of_work_factory=app.state.uow_factory,
-                learning_service=LearningService(app.state.uow_factory), portfolio_service=portfolio_service,
-            )
-            action_executor = AllowlistedLearningActionExecutor(
-                unit_of_work_factory=app.state.uow_factory, adaptive_learning_service=adaptive_learning_service,
-                tutor_service=tutor_service, lesson_tutor_service=lesson_tutor_service,
-                scenario_tutor_service=scenario_tutor_service, portfolio_tutor_service=portfolio_tutor_service,
-            )
-
-            rule_based_classifier = RuleBasedLearningIntentClassifier()
-            intent_classifier = rule_based_classifier
-            if learning_orchestrator_settings.langgraph_model_intent_classification:
-                intent_model_client = HttpIntentClassificationModelClient(
-                    base_url=learning_orchestrator_settings.langgraph_intent_model_base_url,
-                    api_key=learning_orchestrator_settings.langgraph_intent_model_api_key,
-                    model_name=learning_orchestrator_settings.langgraph_intent_model_name,
-                )
-                intent_classifier = ModelAssistedLearningIntentClassifier(
-                    rule_based=rule_based_classifier, model_client=intent_model_client, enabled=True,
-                )
-
-            node_deps = NodeDependencies(
-                unit_of_work_factory=app.state.uow_factory, intent_classifier=intent_classifier,
-                context_loader=context_loader, action_executor=action_executor, guardrail=RuleBasedTutorGuardrail(),
-                clock=utc_now,
-                max_context_characters=learning_orchestrator_settings.langgraph_max_context_characters,
-                max_state_list_items=learning_orchestrator_settings.langgraph_max_state_list_items,
-                language_service=app.state.language_service,
-                language_service_enabled=app.state.language_service_enabled,
-            )
-            graph_nodes = GraphNodes(node_deps)
-            subgraphs = Subgraphs(
-                SubgraphDependencies(
-                    tutor_service=tutor_service, lesson_tutor_service=lesson_tutor_service,
-                    scenario_tutor_service=scenario_tutor_service, portfolio_tutor_service=portfolio_tutor_service,
-                    adaptive_learning_service=adaptive_learning_service, context_loader=context_loader,
-                )
-            )
-            compiled_graph = build_graph(graph_nodes=graph_nodes, subgraphs=subgraphs, checkpointer=checkpointer)
-            graph_runtime = LangGraphOrchestratorRuntime(
-                graph=compiled_graph, max_steps=learning_orchestrator_settings.langgraph_max_steps,
-                run_timeout_seconds=learning_orchestrator_settings.langgraph_run_timeout_seconds,
-            )
-            app.state.learning_orchestrator_service = PersonalizedLearningOrchestratorService(
-                unit_of_work_factory=app.state.uow_factory, graph_runtime=graph_runtime,
-                lock_port=RedisDistributedLock(redis_client), metrics=metrics, tracing=tracing,
-                graph_version=learning_orchestrator_settings.langgraph_graph_version,
-                max_steps=learning_orchestrator_settings.langgraph_max_steps,
-                thread_lock_ttl_seconds=learning_orchestrator_settings.langgraph_thread_lock_ttl_seconds,
-                thread_lock_wait_seconds=learning_orchestrator_settings.langgraph_thread_lock_wait_seconds,
-            )
+        )
+        # Spec G2D2/H1 correction pass, section 5: constructed only when
+        # SEC EDGAR itself is enabled - never fabricates a CIK when SEC is
+        # disabled, `request_live_research` instead returns a bounded
+        # provider-unavailable response for FINANCIAL_FILING_REVIEW/
+        # COMPANY_OVERVIEW in that case.
+        cik_resolver = (
+            SecCompanyTickerResolver(user_agent=live_research_sec_settings.live_research_sec_user_agent)
+            if live_research_sec_settings.live_research_sec_enabled
+            else None
+        )
+        live_research_deps = LiveResearchTriggerDependencies(
+            background_job_service=app.state.background_job_service,
+            account_rate_limiter=account_research_rate_limiter,
+            enabled=live_research_route_enabled,
+            max_question_characters=live_research_account_limit_settings.live_research_max_question_characters,
+            cik_resolver=cik_resolver,
+        )
+        # Spec G2D2/H1 correction pass, section 6: `None` when Ollama is
+        # unconfigured - `synthesize_research_response` then takes the
+        # bounded provider-unavailable path, never a model call.
+        research_model_router = build_research_model(ResearchModelSettings())
+        runtime_composition = await build_learning_orchestrator_runtime(
+            settings=learning_orchestrator_settings, database_url=database_settings.database_url,
+            unit_of_work_factory=app.state.uow_factory, embedding_provider=app.state.embedding_provider,
+            tutor_model=app.state.tutor_model, knowledge_sufficiency_gate=app.state.knowledge_sufficiency_gate,
+            lock_port=RedisDistributedLock(redis_client), metrics=metrics, tracing=tracing,
+            language_service=app.state.language_service, language_service_enabled=app.state.language_service_enabled,
+            live_research=live_research_deps,
+            research_model_router=research_model_router,
+        )
+        app.state.learning_orchestrator_service = runtime_composition.service
+        app.state.learning_orchestrator_checkpointer_pool = runtime_composition.checkpointer_pool
+        checkpointer_pool = runtime_composition.checkpointer_pool
+        intent_model_client = runtime_composition.intent_model_client
 
         try:
             yield
@@ -427,6 +325,9 @@ def create_app(
                 await intent_model_client.aclose()
             if checkpointer_pool is not None:
                 await checkpointer_pool.close()
+            if cik_resolver is not None:
+                await cik_resolver.aclose()
+            await close_research_model(research_model_router)
             await redis_client.aclose()
             await engine.dispose()
 

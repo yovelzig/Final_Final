@@ -85,6 +85,70 @@ def test_interrupt_to_event_passes_through_the_already_safe_payload() -> None:
     assert event["proposal_id"] == "abc"
 
 
+def test_request_live_research_success_emits_research_started() -> None:
+    events = node_update_to_events(
+        "request_live_research", {"research_job_id": "job-1", "research_deadline_at": "2026-01-01T00:10:00Z"}
+    )
+    assert {"type": "research_started", "research_job_id": "job-1", "deadline_at": "2026-01-01T00:10:00Z"} in events
+
+
+def test_request_live_research_unavailable_emits_research_unavailable_not_generic() -> None:
+    events = node_update_to_events(
+        "request_live_research",
+        {"final_response": {"answer_markdown": "unavailable", "grounding_status": "INSUFFICIENT_EVIDENCE"}},
+    )
+    types = [e["type"] for e in events]
+    assert "research_unavailable" in types
+    assert "response_completed" not in types
+
+
+def test_synthesize_research_response_grounded_emits_research_completed() -> None:
+    events = node_update_to_events(
+        "synthesize_research_response",
+        {"final_response": {"answer_markdown": "answer", "grounding_status": "GROUNDED", "navigation_target": None}},
+    )
+    types = [e["type"] for e in events]
+    assert "research_completed" in types
+    assert "response_completed" not in types
+
+
+def test_synthesize_research_response_no_evidence_emits_research_unavailable() -> None:
+    events = node_update_to_events(
+        "synthesize_research_response",
+        {"final_response": {"answer_markdown": "sorry", "grounding_status": "INSUFFICIENT_EVIDENCE"}},
+    )
+    types = [e["type"] for e in events]
+    assert "research_unavailable" in types
+    assert "research_completed" not in types
+
+
+def test_other_nodes_still_emit_generic_response_completed() -> None:
+    events = node_update_to_events(
+        "grounded_explanation", {"final_response": {"answer_markdown": "x", "grounding_status": "GROUNDED"}}
+    )
+    types = [e["type"] for e in events]
+    assert "response_completed" in types
+    assert "research_completed" not in types
+
+
+def test_await_research_result_interrupt_emits_research_waiting_update() -> None:
+    payload = {"research_job_id": "job-1", "scope": "NEWS_SCAN", "deadline_at": "2026-01-01T00:10:00Z"}
+    event = interrupt_to_event(payload)
+    assert event == {
+        "type": "research_waiting_update", "research_job_id": "job-1", "scope": "NEWS_SCAN",
+        "deadline_at": "2026-01-01T00:10:00Z",
+    }
+
+
+def test_approval_interrupt_is_never_misclassified_as_research_waiting() -> None:
+    payload = {
+        "proposal_id": "abc", "title": "t", "description": "d", "reason": "r", "safe_parameters": {},
+        "expires_at": None,
+    }
+    event = interrupt_to_event(payload)
+    assert event["type"] == "approval_required"
+
+
 def test_error_and_heartbeat_events_are_allow_listed() -> None:
     assert error_event("oops")["type"] in ALLOWED_EVENT_TYPES
     assert heartbeat_event()["type"] in ALLOWED_EVENT_TYPES
@@ -100,6 +164,9 @@ def test_every_event_produced_has_an_allow_listed_type() -> None:
         ("grounded_explanation", {"citations": [{"citation_number": 1, "source_title": "s", "document_title": "d"}]}),
         ("execute_action", {"action_result": {}}),
         ("persist_final_result", {}),
+        ("request_live_research", {"research_job_id": "job-1", "research_deadline_at": "2026-01-01T00:10:00Z"}),
+        ("request_live_research", {"final_response": {"answer_markdown": "x", "grounding_status": "INSUFFICIENT_EVIDENCE"}}),
+        ("synthesize_research_response", {"final_response": {"answer_markdown": "x", "grounding_status": "GROUNDED"}}),
     ]
     for node_name, update in sample_updates:
         for event in node_update_to_events(node_name, update):

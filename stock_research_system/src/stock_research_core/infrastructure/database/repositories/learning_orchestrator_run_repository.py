@@ -30,12 +30,16 @@ class SqlAlchemyLearningOrchestratorRunRepository:
     async def create(self, run: LearningOrchestratorRun) -> LearningOrchestratorRun:
         row = LearningOrchestratorRunORM(
             run_id=run.run_id, thread_id=run.thread_id, learner_id=run.learner_id,
+            trusted_account_id=run.trusted_account_id,
             input_message_id=run.input_message_id, output_tutor_answer_id=run.output_tutor_answer_id,
             status=run.status.value, intent=run.intent.value if run.intent else None,
             route=run.route.value if run.route else None, idempotency_key=run.idempotency_key,
             correlation_id=run.correlation_id, step_count=run.step_count, maximum_steps=run.maximum_steps,
             started_at=run.started_at, waiting_at=run.waiting_at, completed_at=run.completed_at,
             cancelled_at=run.cancelled_at, failure_code=run.failure_code, failure_message=run.failure_message,
+            research_job_id=run.research_job_id, research_request_id=run.research_request_id,
+            research_run_id=run.research_run_id, research_deadline_at=run.research_deadline_at,
+            research_failure_category=run.research_failure_category, evidence_count=run.evidence_count,
             graph_version=run.graph_version,
         )
         self._session.add(row)
@@ -80,6 +84,83 @@ class SqlAlchemyLearningOrchestratorRunRepository:
     async def mark_waiting_for_learner(self, run_id: UUID, *, waiting_at: datetime) -> LearningOrchestratorRun:
         row = await self._get_or_raise(run_id)
         self._update(row, status=LearningOrchestratorRunStatus.WAITING_FOR_LEARNER.value, waiting_at=waiting_at)
+        await self._session.flush()
+        await self._session.refresh(row)
+        return learning_orchestrator_run_orm_to_domain(row)
+
+    async def mark_waiting_for_research(
+        self, run_id: UUID, *, waiting_at: datetime, research_job_id: UUID, research_deadline_at: datetime,
+    ) -> LearningOrchestratorRun:
+        row = await self._get_or_raise(run_id)
+        self._update(
+            row, status=LearningOrchestratorRunStatus.WAITING_FOR_RESEARCH.value, waiting_at=waiting_at,
+            research_job_id=research_job_id, research_deadline_at=research_deadline_at,
+        )
+        await self._session.flush()
+        await self._session.refresh(row)
+        return learning_orchestrator_run_orm_to_domain(row)
+
+    async def set_research_outcome(
+        self, run_id: UUID, *, research_request_id: UUID | None, research_run_id: UUID | None,
+        research_failure_category: str | None, evidence_count: int | None,
+    ) -> LearningOrchestratorRun:
+        row = await self._get_or_raise(run_id)
+        self._update(
+            row, research_request_id=research_request_id, research_run_id=research_run_id,
+            research_failure_category=research_failure_category, evidence_count=evidence_count,
+        )
+        await self._session.flush()
+        await self._session.refresh(row)
+        return learning_orchestrator_run_orm_to_domain(row)
+
+    async def get_by_research_job_id(self, research_job_id: UUID) -> LearningOrchestratorRun | None:
+        statement = select(LearningOrchestratorRunORM).where(
+            LearningOrchestratorRunORM.research_job_id == research_job_id
+        )
+        result = await self._session.execute(statement)
+        row = result.scalars().first()
+        return learning_orchestrator_run_orm_to_domain(row) if row is not None else None
+
+    async def list_waiting_for_research(self, *, limit: int = 100) -> list[LearningOrchestratorRun]:
+        """Bounded scan used by the reconciliation sweep (spec section 13)
+        to find runs stuck in `WAITING_FOR_RESEARCH` - callers cross-check
+        each run's linked `BackgroundJob` status themselves, since this
+        repository has no knowledge of the operations/jobs schema."""
+        statement = (
+            select(LearningOrchestratorRunORM)
+            .where(LearningOrchestratorRunORM.status == LearningOrchestratorRunStatus.WAITING_FOR_RESEARCH.value)
+            .order_by(LearningOrchestratorRunORM.waiting_at.asc())
+            .limit(limit)
+        )
+        result = await self._session.execute(statement)
+        return [learning_orchestrator_run_orm_to_domain(row) for row in result.scalars().all()]
+
+    async def list_waiting_for_research_past_deadline(
+        self, *, now: datetime, limit: int = 100
+    ) -> list[LearningOrchestratorRun]:
+        """G2D2/H1 correction pass, section 9, scenario 4: bounded scan
+        for the deadline-expiry reconciliation sweep - rows still
+        `WAITING_FOR_RESEARCH` whose own `research_deadline_at` has
+        already passed. A row with no `research_deadline_at` at all
+        (should not happen given `request_live_research` always sets one
+        before this status is written, but not database-enforced) is
+        never matched - never expired on an absent deadline."""
+        statement = (
+            select(LearningOrchestratorRunORM)
+            .where(
+                LearningOrchestratorRunORM.status == LearningOrchestratorRunStatus.WAITING_FOR_RESEARCH.value,
+                LearningOrchestratorRunORM.research_deadline_at.is_not(None),
+                LearningOrchestratorRunORM.research_deadline_at < now,
+            )
+            .order_by(LearningOrchestratorRunORM.research_deadline_at.asc())
+            .limit(limit)
+        )
+        result = await self._session.execute(statement)
+        return [learning_orchestrator_run_orm_to_domain(row) for row in result.scalars().all()]
+
+    async def mark_expired(self, run_id: UUID, *, completed_at: datetime) -> LearningOrchestratorRun:
+        row = await self._get_or_raise(run_id)
+        self._update(row, status=LearningOrchestratorRunStatus.EXPIRED.value, completed_at=completed_at)
         await self._session.flush()
         await self._session.refresh(row)
         return learning_orchestrator_run_orm_to_domain(row)

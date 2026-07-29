@@ -143,7 +143,14 @@ class SystemMaintenanceParameters(JobParameters):
     #: their time limit as FAILED so they stop blocking their resource
     #: lock/idempotency scope. Kept as an explicit allow-list (never an
     #: arbitrary command string) so this job type can never be used to
-    #: invoke unreviewed behavior.
+    #: invoke unreviewed behavior. The Coach-research reconciliation
+    #: sweep (spec G2D2 section 13) is deliberately *not* routed through
+    #: this job type - `BackgroundJobService.reconcile_waiting_coach_runs`
+    #: is invoked directly (by the admin CLI today), since routing it
+    #: through SYSTEM_MAINTENANCE would require `SystemMaintenanceJobHandler`
+    #: to depend on the very `BackgroundJobService` instance that
+    #: constructs it via the job registry - a circular composition
+    #: dependency this phase avoids rather than works around.
     action: str = Field(default="expire_stale_running_jobs", pattern=r"^[a-z_]{1,64}$")
     stale_after_minutes: int = Field(default=60, gt=0, le=1440)
 
@@ -343,6 +350,19 @@ class LiveResearchRunExecutionParameters(JobParameters):
         if self.scope not in (ResearchScope.FINANCIAL_FILING_REVIEW, ResearchScope.MARKET_DATA_SNAPSHOT):
             DiscoverySearchRequest(query=self.original_question)
         return self
+
+
+class CoachResearchResumeParameters(JobParameters):
+    """Internal-only (spec G2D2 section 12) parameters for
+    `COACH_RESEARCH_RESUME`. Carries only the three identifiers the
+    handler needs to look up and re-verify everything else from
+    PostgreSQL (section 16) - never a resume decision, never evidence,
+    never any value sourced from a resume payload or model output.
+    Only `SYSTEM` may trigger this job type (see `job_registry.py`)."""
+
+    coach_run_id: UUID
+    coach_thread_id: UUID
+    research_job_id: UUID
 
 
 # -- application-level result models -----------------------------------------------

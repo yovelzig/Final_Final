@@ -20,8 +20,18 @@ ALLOWED_EVENT_TYPES = frozenset(
         "run_started", "stage", "intent", "route", "retrieval_started", "retrieval_completed",
         "response_started", "response_completed", "citation", "action_proposed", "approval_required",
         "action_started", "action_completed", "run_completed", "error", "heartbeat",
+        # Spec G2D2 section 12: automatic Live Research trigger events -
+        # bounded, no provider/job internals, driven purely by
+        # server-pushed SSE so the frontend never needs a manual
+        # "resume" action to see a research answer land.
+        "research_started", "research_waiting_update", "research_completed", "research_unavailable",
     }
 )
+
+#: Live Research node names whose `final_response`/interrupt payload get
+#: their own distinct event type below, instead of the generic
+#: `response_completed`/`approval_required` every other node uses.
+_LIVE_RESEARCH_NODE_NAMES = frozenset({"request_live_research", "synthesize_research_response"})
 
 _MAX_STREAMED_CITATIONS = 10
 
@@ -57,16 +67,37 @@ def node_update_to_events(node_name: str, update: dict[str, Any]) -> list[dict[s
             }
         )
 
-    if "final_response" in update and node_name != "persist_final_result":
-        final_response = update["final_response"] or {}
+    if "research_job_id" in update and node_name == "request_live_research":
         events.append(
             {
-                "type": "response_completed",
-                "answer_markdown": final_response.get("answer_markdown"),
-                "grounding_status": final_response.get("grounding_status"),
-                "navigation_target": final_response.get("navigation_target"),
+                "type": "research_started", "research_job_id": update.get("research_job_id"),
+                "deadline_at": update.get("research_deadline_at"),
             }
         )
+
+    if "final_response" in update and node_name != "persist_final_result":
+        final_response = update["final_response"] or {}
+        if node_name in _LIVE_RESEARCH_NODE_NAMES:
+            research_event_type = (
+                "research_completed" if final_response.get("grounding_status") == "GROUNDED" else "research_unavailable"
+            )
+            events.append(
+                {
+                    "type": research_event_type,
+                    "answer_markdown": final_response.get("answer_markdown"),
+                    "grounding_status": final_response.get("grounding_status"),
+                    "navigation_target": final_response.get("navigation_target"),
+                }
+            )
+        else:
+            events.append(
+                {
+                    "type": "response_completed",
+                    "answer_markdown": final_response.get("answer_markdown"),
+                    "grounding_status": final_response.get("grounding_status"),
+                    "navigation_target": final_response.get("navigation_target"),
+                }
+            )
 
     proposed_action = update.get("proposed_action")
     if proposed_action and "proposal_id" in proposed_action and node_name == "build_action_proposal":
@@ -88,11 +119,34 @@ def node_update_to_events(node_name: str, update: dict[str, Any]) -> list[dict[s
     return events
 
 
+def interrupt_reason(interrupt_value: dict[str, Any]) -> str:
+    """This graph has exactly two `interrupt()` call sites -
+    `approval_interrupt` and `await_research_result` - discriminated
+    here by payload shape (never by node name, since a LangGraph
+    `__interrupt__` chunk carries only the interrupt's own value, not
+    the name of the node that raised it): `await_research_result`'s
+    payload always has a `research_job_id` key and never a `proposal_id`
+    key, `approval_interrupt`'s payload is the reverse. Returns
+    `"research"` or `"approval"` - the single source of truth both
+    `interrupt_to_event` (SSE shaping) and
+    `LangGraphOrchestratorRuntime`/`PersonalizedLearningOrchestratorService`
+    (run-status finalization) use to classify an interrupt, so the two
+    can never disagree about which one just fired."""
+    if "research_job_id" in interrupt_value and "proposal_id" not in interrupt_value:
+        return "research"
+    return "approval"
+
+
 def interrupt_to_event(interrupt_value: dict[str, Any]) -> dict[str, Any]:
-    """The single `approval_required` event shape sent for a LangGraph
-    `interrupt()` - `interrupt_value` is already the learner-safe payload
-    `GraphNodes.approval_interrupt` built (proposal id/title/description/
-    reason/safe parameters/expiration only)."""
+    """`interrupt_value` is already the learner-safe payload the raising
+    node built (proposal id/title/description/reason/safe parameters/
+    expiration, or research_job_id/scope/deadline_at - never raw
+    evidence, never provider/job internals)."""
+    if interrupt_reason(interrupt_value) == "research":
+        return {
+            "type": "research_waiting_update", "research_job_id": interrupt_value.get("research_job_id"),
+            "scope": interrupt_value.get("scope"), "deadline_at": interrupt_value.get("deadline_at"),
+        }
     return {"type": "approval_required", **interrupt_value}
 
 

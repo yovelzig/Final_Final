@@ -112,6 +112,32 @@ def live_research_job_resource_key(context: JobExecutionContext) -> str:
     return key
 
 
+def reconcile_waiting_coach_runs_resource_key() -> str:
+    """Spec G2D2 section 13: a single fixed key so at most one
+    reconciliation sweep runs at a time - overlapping sweeps would
+    otherwise race on the same idempotency-key read-then-write the
+    terminal-transaction hook (`_maybe_create_coach_resume_job`) uses."""
+    return "reconcile-waiting-coach-runs"
+
+
+def coach_research_resume_resource_key(*, coach_run_id: UUID) -> str:
+    """Locks `COACH_RESEARCH_RESUME` per Coach run (spec G2D2 section 12),
+    so the terminal-transaction hook and the reconciliation sweep can
+    never both resume the same run concurrently - the same thread-safety
+    guarantee `learning_orchestrator_thread_resource_key` gives the Coach
+    graph itself, but keyed on the durable run id rather than the
+    in-process Redis thread lock."""
+    return f"coach-research-resume:{coach_run_id}"
+
+
+def expire_stale_waiting_for_research_resource_key() -> str:
+    """G2D2/H1 correction pass, section 9: a single fixed key, distinct
+    from `reconcile_waiting_coach_runs_resource_key`, so the deadline-
+    expiry sweep and the resume-recovery sweep can each run
+    independently without contending on the same lock."""
+    return "expire-stale-waiting-for-research"
+
+
 @asynccontextmanager
 async def held_lock(
     lock_port: DistributedLockPort,

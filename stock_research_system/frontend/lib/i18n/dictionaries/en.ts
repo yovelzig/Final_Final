@@ -286,6 +286,10 @@ export const en = {
     approve: "Approve",
     notNow: "Not now",
     continueLabel: "Continue",
+    researchStarted: "Looking that up for you…",
+    researchWaiting: "Still researching… this can take a minute.",
+    researchTimedOut: "This is taking longer than expected. Please check back shortly.",
+    researchFailed: "This request could not be completed. Please try again.",
   },
   emptyState: {
     genericTitle: "Nothing here yet",

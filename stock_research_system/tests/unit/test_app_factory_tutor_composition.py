@@ -1,4 +1,7 @@
-"""Unit tests for `app_factory._build_tutor_model` (Phase D provider dispatch).
+"""Unit tests for `infrastructure.ai_tutor.model_factory.build_tutor_model`
+(Phase D provider dispatch; moved out of `api.app_factory` in spec G2D2
+so `infrastructure.operations.celery_tasks`'s coach-worker composition
+can share it).
 
 Pure composition-root tests: no FastAPI app is constructed, no database or
 Redis is touched, and no real network call is ever made (the OpenAI-compatible
@@ -11,10 +14,10 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from stock_research_core.api.app_factory import (
-    _build_knowledge_sufficiency_gate,
-    _build_tutor_model,
-    _close_tutor_model,
+from stock_research_core.infrastructure.ai_tutor.model_factory import (
+    build_knowledge_sufficiency_gate as _build_knowledge_sufficiency_gate,
+    build_tutor_model as _build_tutor_model,
+    close_tutor_model as _close_tutor_model,
 )
 from stock_research_core.application.ai_tutor.sufficiency import (
     DisabledKnowledgeSufficiencyGate,
@@ -154,7 +157,7 @@ class TestTutorModelLifespanClose:
 
 
 class TestKnowledgeSufficiencyGateComposition:
-    """Unit tests for `app_factory._build_knowledge_sufficiency_gate`
+    """Unit tests for `infrastructure.ai_tutor.model_factory.build_knowledge_sufficiency_gate`
     (Phase E1). Mirrors `TestProviderDispatch` above: the enabled/disabled
     choice is made once, here, in composition - never as a scattered flag
     check inside `GroundedAITutorService`."""

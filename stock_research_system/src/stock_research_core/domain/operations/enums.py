@@ -23,6 +23,11 @@ class BackgroundJobType(StrEnum):
     LEARNING_QUALITY_AGGREGATION = "LEARNING_QUALITY_AGGREGATION"
     QUALITY_BASELINE_COMPARISON = "QUALITY_BASELINE_COMPARISON"
     LIVE_RESEARCH_RUN_EXECUTION = "LIVE_RESEARCH_RUN_EXECUTION"
+    #: Internal-only (spec G2D2 section 12): resumes a Coach run that was
+    #: paused `WAITING_FOR_RESEARCH` once its linked `LIVE_RESEARCH_RUN_
+    #: EXECUTION` job reaches a terminal status. Never triggerable by API,
+    #: ADMIN_CLI, or N8N - only SYSTEM (see `job_registry.py`).
+    COACH_RESEARCH_RESUME = "COACH_RESEARCH_RESUME"
 
 
 class BackgroundJobStatus(StrEnum):

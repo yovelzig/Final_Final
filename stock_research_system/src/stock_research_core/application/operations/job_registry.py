@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from stock_research_core.application.operations.models import (
+    CoachResearchResumeParameters,
     CurriculumKnowledgeRefreshParameters,
     JobParameters,
     KnowledgeGapSummaryParameters,
@@ -195,6 +196,12 @@ _NO_N8N_OR_API = frozenset(
 _ADMIN_SYSTEM_RETRY_N8N = frozenset(
     {JobTriggerSource.ADMIN_CLI, JobTriggerSource.SYSTEM, JobTriggerSource.RETRY, JobTriggerSource.N8N}
 )
+# Spec G2D2 section 12: `COACH_RESEARCH_RESUME` is purely internal - the
+# terminal-transaction hook and the reconciliation sweep are the only two
+# callers, both SYSTEM-triggered. Never API, ADMIN_CLI, or N8N: a learner,
+# an operator, or an external automation caller must never be able to
+# force-resume a Coach run.
+_SYSTEM_ONLY = frozenset({JobTriggerSource.SYSTEM})
 
 
 def build_default_retry_policies() -> dict[BackgroundJobType, object]:
@@ -252,6 +259,11 @@ def build_default_retry_policies() -> dict[BackgroundJobType, object]:
         BackgroundJobType.LEARNING_QUALITY_AGGREGATION: infra_transient,
         BackgroundJobType.QUALITY_BASELINE_COMPARISON: infra_transient,
         BackgroundJobType.LIVE_RESEARCH_RUN_EXECUTION: live_research_transient,
+        # Retries only transient infrastructure failures (a DB/Redis
+        # hiccup during resume verification) - a failed ownership/state
+        # check is never retryable, and the reconciliation sweep (not
+        # this policy) is what recovers a resume that never got queued.
+        BackgroundJobType.COACH_RESEARCH_RESUME: infra_transient,
     }
 
 
@@ -275,6 +287,7 @@ _JOB_TYPE_CONFIG: dict[BackgroundJobType, tuple[str, int, int, frozenset[JobTrig
     # integration endpoint) - the admin-facing API trigger source
     # remains deliberately excluded; see docs/migration-status.md.
     BackgroundJobType.LIVE_RESEARCH_RUN_EXECUTION: ("finquest.research", 180, 4, _ADMIN_SYSTEM_RETRY_N8N),
+    BackgroundJobType.COACH_RESEARCH_RESUME: ("finquest.coach", 120, 3, _SYSTEM_ONLY),
 }
 
 _JOB_TYPE_PARAMETER_MODEL: dict[BackgroundJobType, type[JobParameters]] = {
@@ -292,6 +305,7 @@ _JOB_TYPE_PARAMETER_MODEL: dict[BackgroundJobType, type[JobParameters]] = {
     BackgroundJobType.LEARNING_QUALITY_AGGREGATION: LearningQualityAggregationParameters,
     BackgroundJobType.QUALITY_BASELINE_COMPARISON: QualityBaselineComparisonParameters,
     BackgroundJobType.LIVE_RESEARCH_RUN_EXECUTION: LiveResearchRunExecutionParameters,
+    BackgroundJobType.COACH_RESEARCH_RESUME: CoachResearchResumeParameters,
 }
 
 
@@ -299,6 +313,7 @@ def _default_resource_key_builder(
     job_type: BackgroundJobType,
 ) -> Callable[[JobExecutionContext, JobParameters], str | None]:
     from stock_research_core.application.operations.locking import (
+        coach_research_resume_resource_key,
         knowledge_curriculum_refresh_resource_key,
         knowledge_document_reembed_resource_key,
         live_research_job_resource_key,
@@ -346,6 +361,12 @@ def _default_resource_key_builder(
     if job_type == BackgroundJobType.LIVE_RESEARCH_RUN_EXECUTION:
         def _builder(context: JobExecutionContext, _parameters: JobParameters) -> str | None:
             return live_research_job_resource_key(context)
+
+        return _builder
+    if job_type == BackgroundJobType.COACH_RESEARCH_RESUME:
+        def _builder(_context: JobExecutionContext, parameters: JobParameters) -> str | None:
+            assert isinstance(parameters, CoachResearchResumeParameters)
+            return coach_research_resume_resource_key(coach_run_id=parameters.coach_run_id)
 
         return _builder
     return _no_lock

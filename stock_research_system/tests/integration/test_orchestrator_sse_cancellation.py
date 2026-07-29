@@ -164,8 +164,8 @@ async def _cancel_paused_run(service, runtime, *, learner_id, thread_id) -> None
     wait for it to actually reach that pause point, then cancel the
     consuming task - reproducing a client disconnect at that exact moment."""
     stream = service.stream_start_run(
-        learner_id=learner_id, thread_id=thread_id, user_input="What is diversification?",
-        idempotency_key=f"key-{uuid4()}",
+        learner_id=learner_id, trusted_account_id=learner_id, thread_id=thread_id,
+        user_input="What is diversification?", idempotency_key=f"key-{uuid4()}",
     )
 
     async def _consume():
@@ -218,8 +218,8 @@ async def test_a_later_run_on_the_same_thread_proceeds_without_waiting_for_the_t
 
     async def _run_to_completion():
         events = [event async for event in following_service.stream_start_run(
-            learner_id=learner.learner_id, thread_id=thread.thread_id, user_input="What is a bond?",
-            idempotency_key=f"key-{uuid4()}",
+            learner_id=learner.learner_id, trusted_account_id=learner.learner_id, thread_id=thread.thread_id,
+            user_input="What is a bond?", idempotency_key=f"key-{uuid4()}",
         )]
         return events
 

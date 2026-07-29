@@ -6,9 +6,11 @@ required). Not collected by pytest (no `test_` prefix) - imported by the
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
+from stock_research_core.domain.ai_tutor.enums import GroundingStatus
 from stock_research_core.domain.learning_orchestrator.enums import LearningActionProposalStatus
 from stock_research_core.domain.learning_orchestrator.models import (
     LearningActionProposal,
@@ -90,6 +92,50 @@ class FakeRunRepo:
         from stock_research_core.domain.learning_orchestrator.enums import LearningOrchestratorRunStatus
 
         return self._update(run_id, status=LearningOrchestratorRunStatus.WAITING_FOR_LEARNER, waiting_at=waiting_at)
+
+    async def mark_waiting_for_research(self, run_id: UUID, *, waiting_at, research_job_id, research_deadline_at):
+        from stock_research_core.domain.learning_orchestrator.enums import LearningOrchestratorRunStatus
+
+        return self._update(
+            run_id, status=LearningOrchestratorRunStatus.WAITING_FOR_RESEARCH, waiting_at=waiting_at,
+            research_job_id=research_job_id, research_deadline_at=research_deadline_at,
+        )
+
+    async def set_research_outcome(
+        self, run_id: UUID, *, research_request_id, research_run_id, research_failure_category, evidence_count,
+    ):
+        return self._update(
+            run_id, research_request_id=research_request_id, research_run_id=research_run_id,
+            research_failure_category=research_failure_category, evidence_count=evidence_count,
+        )
+
+    async def get_by_research_job_id(self, research_job_id: UUID):
+        for run in self.runs.values():
+            if run.research_job_id == research_job_id:
+                return run
+        return None
+
+    async def list_waiting_for_research(self, *, limit: int = 100):
+        from stock_research_core.domain.learning_orchestrator.enums import LearningOrchestratorRunStatus
+
+        matches = [run for run in self.runs.values() if run.status == LearningOrchestratorRunStatus.WAITING_FOR_RESEARCH]
+        return matches[:limit]
+
+    async def list_waiting_for_research_past_deadline(self, *, now, limit: int = 100):
+        from stock_research_core.domain.learning_orchestrator.enums import LearningOrchestratorRunStatus
+
+        matches = [
+            run for run in self.runs.values()
+            if run.status == LearningOrchestratorRunStatus.WAITING_FOR_RESEARCH
+            and run.research_deadline_at is not None
+            and run.research_deadline_at < now
+        ]
+        return matches[:limit]
+
+    async def mark_expired(self, run_id: UUID, *, completed_at):
+        from stock_research_core.domain.learning_orchestrator.enums import LearningOrchestratorRunStatus
+
+        return self._update(run_id, status=LearningOrchestratorRunStatus.EXPIRED, completed_at=completed_at)
 
     async def update_progress(self, run_id: UUID, *, step_count, intent=None, route=None):
         updates: dict[str, Any] = {"step_count": step_count}
@@ -199,19 +245,33 @@ class FakeActionRepo:
         return [p for p in self.proposals.values() if p.run_id == run_id]
 
 
+class FakeEvidenceItemRepo:
+    """Spec G2D2 section 17: `synthesize_research_response` reloads
+    evidence from PostgreSQL rather than trusting the resume payload -
+    this fake stands in for `uow.evidence_items` in those tests."""
+
+    def __init__(self, *, items_by_run: dict[UUID, list[Any]] | None = None) -> None:
+        self.items_by_run = items_by_run or {}
+
+    async def list_for_run(self, run_id: UUID) -> list[Any]:
+        return self.items_by_run.get(run_id, [])
+
+
 class FakeUnitOfWork:
-    """A minimal `UnitOfWorkPort` stand-in exposing only the four Phase 12
-    repositories - sufficient for every orchestrator unit test, since
-    none of them touch any other repository."""
+    """A minimal `UnitOfWorkPort` stand-in exposing the Phase 12
+    repositories plus (spec G2D2) `evidence_items` - sufficient for every
+    orchestrator unit test, since none of them touch any other repository."""
 
     def __init__(
         self, *, threads: FakeThreadRepo | None = None, runs: FakeRunRepo | None = None,
         events: FakeEventRepo | None = None, actions: FakeActionRepo | None = None,
+        evidence_items: FakeEvidenceItemRepo | None = None,
     ) -> None:
         self.learning_orchestrator_threads = threads or FakeThreadRepo()
         self.learning_orchestrator_runs = runs or FakeRunRepo()
         self.learning_orchestrator_events = events or FakeEventRepo()
         self.learning_orchestrator_actions = actions or FakeActionRepo()
+        self.evidence_items = evidence_items or FakeEvidenceItemRepo()
 
     async def __aenter__(self) -> "FakeUnitOfWork":
         return self
@@ -281,13 +341,26 @@ class FakeTracing:
 
 class FakeGraphRuntime:
     """A scripted `LearningGraphRuntimePort` - the test supplies the
-    exact `(state, is_waiting)` result(s) `start_run`/`resume_run`
-    should return, so orchestrator-service tests never need a real
-    LangGraph graph or checkpointer."""
+    exact `(state, interrupt_reason)` result(s) `start_run`/`resume_run`
+    should return (`interrupt_reason` is `"approval"`, `"research"`, or
+    `None`), and optionally the exact SSE event sequence `stream_run`/
+    `stream_resume` should yield, so orchestrator-service tests never
+    need a real LangGraph graph or checkpointer."""
 
-    def __init__(self, *, result: tuple[dict, bool] | None = None, error: Exception | None = None) -> None:
-        self.result = result or ({"step_count": 1}, False)
+    def __init__(
+        self, *, result: tuple[dict, str | None] | None = None, error: Exception | None = None,
+        stream_events: list[dict] | None = None, stream_side_effect=None,
+    ) -> None:
+        self.result = result or ({"step_count": 1}, None)
         self.error = error
+        self.stream_events = stream_events if stream_events is not None else [{"type": "run_completed"}]
+        #: Optional `async def(run_id: str) -> None` invoked after the
+        #: last scripted stream event, before the generator ends -
+        #: simulates a graph node's own direct durable write (e.g.
+        #: `request_live_research` calling `mark_waiting_for_research`)
+        #: happening mid-stream, before `_stream_and_finalize` reads
+        #: `get_state`/calls `_finalize_run`.
+        self.stream_side_effect = stream_side_effect
         self.start_run_calls: list[dict] = []
         self.resume_run_calls: list[dict] = []
         self.cancelled_threads: list[str] = []
@@ -302,7 +375,10 @@ class FakeGraphRuntime:
         async def _gen():
             if self.error is not None:
                 raise self.error
-            yield {"type": "run_completed"}
+            for event in self.stream_events:
+                yield event
+            if self.stream_side_effect is not None:
+                await self.stream_side_effect(run_id)
 
         return _gen()
 
@@ -316,7 +392,10 @@ class FakeGraphRuntime:
         async def _gen():
             if self.error is not None:
                 raise self.error
-            yield {"type": "run_completed"}
+            for event in self.stream_events:
+                yield event
+            if self.stream_side_effect is not None:
+                await self.stream_side_effect(run_id)
 
         return _gen()
 
@@ -328,3 +407,53 @@ class FakeGraphRuntime:
 
     async def cancel_run(self, *, thread_id):
         self.cancelled_threads.append(thread_id)
+
+
+class FakeTutorService:
+    """Duck-types `GroundedAITutorService.create_conversation`/`.ask`
+    (subgraphs.py calls these directly on a concrete `GroundedAITutorService`
+    instance, not a Protocol, so a plain duck-typed fake is sufficient) -
+    used by route-level graph tests that don't need real retrieval/model
+    calls, only a shaped `TutorResponse`-like result."""
+
+    def __init__(
+        self, *, answer_markdown: str = "Fake grounded answer.", grounding_status: GroundingStatus = GroundingStatus.GROUNDED,
+    ) -> None:
+        self.answer_markdown = answer_markdown
+        self.grounding_status = grounding_status
+        self.asked_questions: list[str] = []
+
+    async def create_conversation(self, *, learner_id: UUID, context: Any) -> SimpleNamespace:
+        return SimpleNamespace(conversation_id=uuid4())
+
+    async def ask(self, *, conversation_id: UUID, question: str, context: Any = None) -> SimpleNamespace:
+        self.asked_questions.append(question)
+        return SimpleNamespace(
+            citations=[],
+            answer=SimpleNamespace(answer_markdown=self.answer_markdown, grounding_status=self.grounding_status),
+        )
+
+
+class FakeContextLoader:
+    """A `LearningContextLoaderPort` stand-in returning empty-but-shaped
+    summaries - sufficient for route tests that only need
+    `progress_reflection`/`adaptive_recommendation` to execute without
+    a real database."""
+
+    async def load_dashboard(self, learner_id: UUID) -> dict[str, Any]:
+        return {}
+
+    async def load_mastery_summary(self, learner_id: UUID) -> list[dict[str, Any]]:
+        return []
+
+    async def load_progress_summary(self, learner_id: UUID) -> list[dict[str, Any]]:
+        return []
+
+    async def load_active_misconceptions(self, learner_id: UUID) -> list[dict[str, Any]]:
+        return []
+
+    async def load_due_review_summary(self, learner_id: UUID) -> list[dict[str, Any]]:
+        return []
+
+    async def load_lesson_metadata(self, *, learner_id: UUID, lesson_id: UUID) -> dict[str, Any]:
+        return {}

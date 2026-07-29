@@ -25,6 +25,8 @@ from stock_research_core.application.ai_tutor.service import TUTOR_POLICY_VERSIO
 from stock_research_core.application.ai_tutor.sufficiency import DisabledKnowledgeSufficiencyGate
 from stock_research_core.application.language.ports import LanguageServicePort
 from stock_research_core.application.language.unavailable_language_service import UnavailableLanguageService
+from stock_research_core.application.exceptions import CoachResearchResumeNotConfiguredError
+from stock_research_core.application.learning_orchestrator.service import PersonalizedLearningOrchestratorService
 from stock_research_core.application.live_research.provider_ports import (
     DiscoverySearchProviderPort,
     OfficialCompanyDataProviderPort,
@@ -32,6 +34,7 @@ from stock_research_core.application.live_research.provider_ports import (
 from stock_research_core.application.live_research.service import ResearchRequestService
 from stock_research_core.application.market_data.service import MarketDataIngestionService
 from stock_research_core.application.operations.handlers import (
+    CoachResearchResumeJobHandler,
     CurriculumKnowledgeRefreshJobHandler,
     KnowledgeGapSummaryJobHandler,
     KnowledgeReembedJobHandler,
@@ -48,6 +51,7 @@ from stock_research_core.application.operations.handlers import (
     TrackedMarketRefreshJobHandler,
 )
 from stock_research_core.application.operations.job_registry import BackgroundJobRegistry, build_default_registry
+from stock_research_core.application.operations.ports import HandlerOutcome, JobExecutionContext, ProgressReporterPort
 from stock_research_core.application.persistence.ports import UnitOfWorkPort
 from stock_research_core.application.quality_evaluation.models import EvaluationConfiguration
 from stock_research_core.application.quality_evaluation.service import QualityEvaluationService
@@ -172,6 +176,27 @@ def _build_official_company_data_provider(settings: SecEdgarSettings) -> Officia
     )
 
 
+class _CoachResumeNotConfiguredHandler:
+    """Registered for `COACH_RESEARCH_RESUME` on every process that was
+    not given a real `learning_orchestrator_service` (every process
+    except `finquest-worker-coach` - see `build_operations_registry`'s
+    `learning_orchestrator_service` parameter). `BackgroundJobRegistry`
+    requires a handler for every `BackgroundJobType` to construct at
+    all, but Celery only ever *delivers* a `finquest.coach`-queued task
+    to the coach worker, so this handler's `.handle()` should never
+    actually run in practice - it exists purely so registry construction
+    succeeds on lightweight workers (market/portfolio/knowledge/etc.)
+    that have no business holding a full Coach/LangGraph composition."""
+
+    async def handle(
+        self, *, context: JobExecutionContext, parameters: object, progress: ProgressReporterPort
+    ) -> HandlerOutcome:
+        raise CoachResearchResumeNotConfiguredError(
+            "This process was not composed with a PersonalizedLearningOrchestratorService and cannot "
+            "execute COACH_RESEARCH_RESUME - only finquest-worker-coach may consume the finquest.coach queue."
+        )
+
+
 def build_operations_registry(
     *,
     unit_of_work_factory: Callable[[], UnitOfWorkPort],
@@ -179,6 +204,7 @@ def build_operations_registry(
     chunker: KnowledgeChunkerPort,
     language_service: LanguageServicePort | None = None,
     language_service_enabled: bool = False,
+    learning_orchestrator_service: PersonalizedLearningOrchestratorService | None = None,
 ) -> BackgroundJobRegistry:
     # Phase G2E2A: defaults to the safe, pure, translation-incapable
     # adapter - callers that don't yet pass a real language service (or
@@ -268,6 +294,14 @@ def build_operations_registry(
             discovery_max_results=discovery_max_results,
             language_service=language_service,
             language_service_enabled=language_service_enabled,
+        ),
+        BackgroundJobType.COACH_RESEARCH_RESUME: (
+            CoachResearchResumeJobHandler(
+                unit_of_work_factory=unit_of_work_factory,
+                learning_orchestrator_service=learning_orchestrator_service,
+            )
+            if learning_orchestrator_service is not None
+            else _CoachResumeNotConfiguredHandler()
         ),
     }
     return build_default_registry(handlers)

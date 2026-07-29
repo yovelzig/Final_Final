@@ -14,8 +14,9 @@ actions) lives in `subgraphs.py`; this module is the shared spine:
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 from uuid import UUID, uuid4
 
@@ -23,8 +24,9 @@ from langgraph.types import interrupt
 
 from stock_research_core.application.ai_tutor.guardrails import RuleBasedTutorGuardrail, more_restrictive_decision
 from stock_research_core.application.ai_tutor.models import TutorContext
-from stock_research_core.application.exceptions import StockResearchError
+from stock_research_core.application.exceptions import ResearchModelProviderError, StockResearchError
 from stock_research_core.application.language.enums import DetectedLanguage, LocalizedMessageKey
+from stock_research_core.application.language.localization import localize
 from stock_research_core.application.language.ports import LanguageServicePort
 from stock_research_core.application.language.query_preparation import (
     LanguageQueryPreparation,
@@ -37,6 +39,10 @@ from stock_research_core.application.learning_orchestrator.actions import (
     AllowlistedLearningActionExecutor,
     ForbiddenLearningActionError,
 )
+from stock_research_core.application.learning_orchestrator.current_information_policy import (
+    InformationNeed,
+    classify_information_need,
+)
 from stock_research_core.application.learning_orchestrator.ports import LearningContextLoaderPort, LearningIntentClassifierPort
 from stock_research_core.application.learning_orchestrator.routing import select_route as pure_select_route
 from stock_research_core.application.learning_orchestrator.state import (
@@ -44,12 +50,19 @@ from stock_research_core.application.learning_orchestrator.state import (
     bounded_list,
     bounded_text,
 )
+from stock_research_core.application.live_research.cik_resolver_ports import CikResolutionStatus, CikResolverPort
+from stock_research_core.application.live_research.citation_verifier import ResearchEvidenceCitationVerifier
+from stock_research_core.application.live_research.ports import ResearchModelPort
+from stock_research_core.application.live_research.rate_limit_ports import AccountResearchRateLimiterPort
+from stock_research_core.application.live_research.synthesis_models import (
+    ResearchEvidenceInput,
+    ResearchSynthesisRequest,
+)
+from stock_research_core.application.operations.service import BackgroundJobService
 from stock_research_core.application.persistence.ports import UnitOfWorkPort
+from stock_research_core.application.shared.text_safety import SharedTextSafetyValidator
 from stock_research_core.domain.ai_tutor.enums import (
-    TutorContextType,
-    TutorGuardrailAction,
-    TutorMessageRole,
-    TutorRequestCategory,
+    TutorContextType, TutorGuardrailAction, TutorMessageRole, TutorRequestCategory,
 )
 from stock_research_core.domain.ai_tutor.models import TutorGuardrailDecision, TutorMessage
 from stock_research_core.domain.learning_orchestrator.enums import (
@@ -61,6 +74,8 @@ from stock_research_core.domain.learning_orchestrator.enums import (
     LearningOrchestratorRoute,
 )
 from stock_research_core.domain.learning_orchestrator.models import LearningActionProposal, LearningOrchestratorEvent
+from stock_research_core.domain.live_research.enums import EvidenceClassification, ResearchScope
+from stock_research_core.domain.operations.enums import BackgroundJobStatus, BackgroundJobType, JobTriggerSource
 
 _ROUTE_LABELS: dict[str, str] = {
     "load_authorized_context": "Loading your learning context",
@@ -84,6 +99,142 @@ _ACTION_PARAMETER_BUILDERS_CONTEXT_KEY: dict[LearningActionType, str] = {
     LearningActionType.OPEN_PORTFOLIO: "portfolio_id",
 }
 
+_MAX_EVIDENCE_EXCERPT_LENGTH = 300
+
+#: Stateless, configuration-free (spec G2D2 section 17) - module-level
+#: singletons rather than threaded through `NodeDependencies`, exactly
+#: like `_bounded_unavailable_response`'s use of `localized_message`.
+_RESEARCH_CITATION_VERIFIER = ResearchEvidenceCitationVerifier()
+_TEXT_SAFETY_VALIDATOR = SharedTextSafetyValidator()
+
+
+def _bounded_unavailable_response(message_key: LocalizedMessageKey, language: DetectedLanguage) -> dict[str, Any]:
+    return {
+        "answer_markdown": localize(message_key, language=language), "citations": [],
+        "grounding_status": "INSUFFICIENT_EVIDENCE", "navigation_target": None,
+    }
+
+
+#: Bounded, standard XBRL us-gaap concepts for a COMPANY_OVERVIEW
+#: snapshot - a fixed, reviewed list, never learner/model-supplied.
+_DEFAULT_COMPANY_OVERVIEW_CONCEPTS = (
+    "Assets", "Liabilities", "StockholdersEquity", "Revenues", "NetIncomeLoss",
+)
+
+#: Common English sentence-leading/finance-generic capitalized words that
+#: must never be mistaken for a company-name candidate.
+_COMPANY_CANDIDATE_STOPWORDS = frozenset(
+    {
+        "what", "who", "when", "where", "why", "how", "is", "are", "was", "were", "the", "a", "an", "i",
+        "did", "does", "do", "latest", "current", "today", "yesterday", "recent", "recently",
+        # Finance-role/regulatory acronyms that are capitalized but are
+        # never themselves a company name.
+        "ceo", "cfo", "coo", "cto", "sec", "ipo", "gaap", "cik", "10-k", "10-q",
+    }
+)
+_TICKER_PATTERN = re.compile(r"\$([A-Za-z]{1,5})\b")
+_CAPITALIZED_WORD_PATTERN = re.compile(r"\b[A-Z][a-zA-Z]{1,30}\b")
+
+
+def _extract_company_reference(question: str) -> tuple[str | None, str | None]:
+    """Bounded, deterministic (no LLM) extraction of a ticker/company-name
+    candidate from free learner text - `request_live_research` never
+    invents or guesses a CIK, so the actual resolution (and rejection of
+    an ambiguous/unmatched candidate) always happens through
+    `CikResolverPort`, never here. Returns `(ticker, company_name)` -
+    at most one is set. Deliberately conservative: no candidate is
+    returned rather than risk resolving the wrong company."""
+    ticker_match = _TICKER_PATTERN.search(question)
+    if ticker_match:
+        return ticker_match.group(1).upper(), None
+
+    for word in _CAPITALIZED_WORD_PATTERN.findall(question):
+        if word.lower() not in _COMPANY_CANDIDATE_STOPWORDS:
+            return None, word
+
+    return None, None
+
+
+_RESEARCH_SYNTHESIS_PROMPT_VERSION = "research-synthesis-v1"
+_RESEARCH_SYNTHESIS_SYSTEM_INSTRUCTIONS = (
+    "You are FinQuest's research assistant. Answer the learner's question using only the evidence "
+    "provided below - never invent a fact, source, or evidence id. Cite every claim by including the "
+    "matching evidence id in cited_evidence_ids. If the evidence does not support a confident answer, "
+    "say so plainly rather than guessing."
+)
+
+
+async def _grounded_synthesis_response(
+    evidence_items: list[Any], *, max_items: int, research_run_id: UUID, user_question: str,
+    scope_value: str | None, language: DetectedLanguage, research_model_router: ResearchModelPort | None,
+    citation_verifier: ResearchEvidenceCitationVerifier, text_safety_validator: SharedTextSafetyValidator,
+) -> dict[str, Any]:
+    """Spec G2D2/H1 correction pass, section 6: verified persisted
+    `EvidenceItem`s -> bounded research synthesis request -> Ollama/
+    OpenAI via `ResearchModelRouter` -> `ResearchEvidenceCitationVerifier`
+    -> `SharedTextSafetyValidator` -> bounded final response. The model
+    receives only verified `EvidenceItem`s from the owned `ResearchRun`
+    (`evidence_items`, already a fresh, run-scoped PostgreSQL read from
+    the caller) - no tools, no web search, no file search, no code
+    execution, no arbitrary functions. Citations are re-verified against
+    `evidence_items` regardless of what the model claims - a fabricated
+    or cross-run evidence id is always rejected, never trusted. No
+    configured router (SEC/Ollama disabled, or a provider failure) is a
+    bounded operational fallback, never a fabricated answer."""
+    if research_model_router is None:
+        return _bounded_unavailable_response(LocalizedMessageKey.PROVIDER_FAILURE, language)
+
+    bounded_items = evidence_items[:max_items]
+    request = ResearchSynthesisRequest(
+        system_instructions=_RESEARCH_SYNTHESIS_SYSTEM_INSTRUCTIONS, user_question=user_question,
+        scope=ResearchScope(scope_value) if scope_value else ResearchScope.GENERAL_QUESTION,
+        evidence_items=[
+            ResearchEvidenceInput(
+                evidence_id=item.evidence_id, source_title=item.source_title, publisher=item.publisher,
+                excerpt=(item.raw_excerpt or item.normalized_text or "")[:_MAX_EVIDENCE_EXCERPT_LENGTH],
+                official=item.classification == EvidenceClassification.OFFICIAL,
+            )
+            for item in bounded_items
+        ],
+        prompt_version=_RESEARCH_SYNTHESIS_PROMPT_VERSION,
+    )
+
+    try:
+        result = await research_model_router.generate(request)
+    except ResearchModelProviderError:
+        return _bounded_unavailable_response(LocalizedMessageKey.PROVIDER_FAILURE, language)
+
+    citation_result = citation_verifier.verify(
+        cited_evidence_ids=result.cited_evidence_ids, verified_run_evidence=bounded_items,
+        research_run_id=research_run_id,
+    )
+    if not citation_result.all_verified or not citation_result.verified_evidence_ids:
+        return _bounded_unavailable_response(LocalizedMessageKey.PROVIDER_FAILURE, language)
+
+    evidence_by_id = {item.evidence_id: item for item in bounded_items}
+    verified_citations: list[dict[str, Any]] = []
+    for index, evidence_id in enumerate(
+        (eid for eid in result.cited_evidence_ids if eid in citation_result.verified_evidence_ids), start=1
+    ):
+        item = evidence_by_id.get(evidence_id)
+        if item is None:
+            continue
+        excerpt = (item.raw_excerpt or item.normalized_text or "")[:_MAX_EVIDENCE_EXCERPT_LENGTH]
+        verified_citations.append(
+            {
+                "citation_number": index, "source_title": item.source_title,
+                "publisher": item.publisher, "source_url": str(item.source_url) if item.source_url else None,
+                "excerpt": excerpt, "official": item.classification == EvidenceClassification.OFFICIAL,
+            }
+        )
+
+    safety_decision = text_safety_validator.validate(result.answer_markdown)
+
+    return {
+        "answer_markdown": safety_decision.bounded_text, "citations": verified_citations,
+        "grounding_status": "GROUNDED", "navigation_target": None,
+    }
+
 
 class RunStepLimitExceededError(StockResearchError):
     """The run exceeded its configured `maximum_steps` - a safe, bounded
@@ -93,6 +244,28 @@ class RunStepLimitExceededError(StockResearchError):
 class InputGuardrailRefusalError(StockResearchError):
     """Not raised in normal flow - used internally to short-circuit to
     `build_refusal_response`'s exact preserved refusal text."""
+
+
+@dataclass(frozen=True)
+class LiveResearchTriggerDependencies:
+    """Spec G2D2 section 11: only constructed and passed to
+    `NodeDependencies.live_research` when the full flag chain
+    (`LANGGRAPH_ENABLED && LANGGRAPH_LIVE_RESEARCH_ROUTE_ENABLED &&
+    LIVE_RESEARCH_JOBS_ENABLED && <provider flag>`) is satisfied - every
+    other composition passes `None`, and every node below treats `None`
+    exactly like `enabled=False`."""
+
+    background_job_service: BackgroundJobService
+    account_rate_limiter: AccountResearchRateLimiterPort
+    enabled: bool
+    max_question_characters: int = 5000
+    research_deadline_seconds: int = 600
+    #: Spec G2D2/H1 correction pass, section 5: the only authoritative
+    #: source of a `sec_cik` for FINANCIAL_FILING_REVIEW/COMPANY_OVERVIEW.
+    #: `None` when SEC EDGAR itself is disabled - `request_live_research`
+    #: then returns a bounded provider-unavailable response for those two
+    #: scopes rather than silently downgrading to NEWS_SCAN.
+    cik_resolver: CikResolverPort | None = None
 
 
 @dataclass(frozen=True)
@@ -115,6 +288,11 @@ class NodeDependencies:
     # text is byte-identical to before this phase.
     language_service: LanguageServicePort = field(default_factory=UnavailableLanguageService)
     language_service_enabled: bool = False
+    live_research: LiveResearchTriggerDependencies | None = None
+    #: Spec G2D2/H1 correction pass, section 6: `None` when unconfigured
+    #: (no Ollama credentials) - `synthesize_research_response` then
+    #: takes the bounded provider-unavailable path, never a model call.
+    research_model_router: ResearchModelPort | None = None
 
 
 def stage_label(node_name: str) -> str:
@@ -289,6 +467,11 @@ class GraphNodes:
             conversation_id=message.conversation_id, message=message, context=context,
             language=detected_language,
             apply_topic_vocabulary_check=detected_language != DetectedLanguage.HE,
+            # The feature flag is also the rollout boundary for Hebrew-aware
+            # topic vocabulary. With it disabled, retain the pre-G2E2
+            # English-only guardrail baseline while keeping every safety
+            # rule active against the original input.
+            apply_hebrew_topic_vocabulary_check=self._deps.language_service_enabled,
         )
         if decision.action == TutorGuardrailAction.REFUSE:
             return {
@@ -378,7 +561,7 @@ class GraphNodes:
             LocalizedMessageKey.INSUFFICIENT_EVIDENCE, language=detected_language
         )
         suggestion = (
-            " נסה/י לשאול על מושג פיננסי-חינוכי ספציפי, ההתקדמות שלך, שיעור, תרגיל, תרחיש, או תיק ההשקעות שלך."
+            " Ã—Â Ã—Â¡Ã—â€/Ã—â„¢ Ã—Å“Ã—Â©Ã—ÂÃ—â€¢Ã—Å“ Ã—Â¢Ã—Å“ Ã—Å¾Ã—â€¢Ã—Â©Ã—â€™ Ã—Â¤Ã—â„¢Ã—Â Ã—Â Ã—Â¡Ã—â„¢-Ã—â€”Ã—â„¢Ã—Â Ã—â€¢Ã—â€ºÃ—â„¢ Ã—Â¡Ã—Â¤Ã—Â¦Ã—â„¢Ã—Â¤Ã—â„¢, Ã—â€Ã—â€Ã—ÂªÃ—Â§Ã—â€œÃ—Å¾Ã—â€¢Ã—Âª Ã—Â©Ã—Å“Ã—Å¡, Ã—Â©Ã—â„¢Ã—Â¢Ã—â€¢Ã—Â¨, Ã—ÂªÃ—Â¨Ã—â€™Ã—â„¢Ã—Å“, Ã—ÂªÃ—Â¨Ã—â€”Ã—â„¢Ã—Â©, Ã—ÂÃ—â€¢ Ã—ÂªÃ—â„¢Ã—Â§ Ã—â€Ã—â€Ã—Â©Ã—Â§Ã—Â¢Ã—â€¢Ã—Âª Ã—Â©Ã—Å“Ã—Å¡."
             if detected_language == DetectedLanguage.HE
             else (
                 " Try asking about a specific financial-education concept, your progress, a lesson, an "
@@ -437,6 +620,217 @@ class GraphNodes:
             state, event_type=LearningOrchestratorEventType.ROUTE_SELECTED, message=f"Routed to {route.value}.",
         )
         return {"step_count": step_count, "selected_route": route.value}
+
+    # -- automatic live research (spec G2D2 section 11) -----------------------------------------------
+
+    async def evaluate_current_information(self, state: LearningCoachGraphState) -> dict[str, Any]:
+        """Runs only for the `GROUNDED_EXPLANATION` route (see
+        `graph_builder._route_after_select_route`) - the deterministic
+        current-information decision (spec section 10) never runs for
+        practice/diagnostic/progress/scenario/portfolio routes in this
+        phase. When the live-research trigger is unconfigured or
+        disabled, this is a no-op and the graph proceeds to
+        `GROUNDED_EXPLANATION` exactly as before this phase existed."""
+        step_count = self._next_step(state)
+        live_research = self._deps.live_research
+        if live_research is None or not live_research.enabled:
+            return {"step_count": step_count}
+
+        decision = classify_information_need(state["user_input"])
+        if decision.need != InformationNeed.CURRENT_INFORMATION or decision.scope is None:
+            return {"step_count": step_count}
+        return {"step_count": step_count, "research_scope": decision.scope.value}
+
+    async def request_live_research(self, state: LearningCoachGraphState) -> dict[str, Any]:
+        step_count = self._next_step(state)
+        language = self._language_from_state(state)
+        live_research = self._deps.live_research
+
+        if live_research is None or not live_research.enabled:
+            return {
+                "step_count": step_count,
+                "final_response": _bounded_unavailable_response(LocalizedMessageKey.RESEARCH_UNAVAILABLE, language),
+            }
+
+        account_id = UUID(state["trusted_account_id"])
+        # The Coach run's own run_id is a stable identity known before
+        # any BackgroundJob exists - `release` uses the same id to give
+        # back exactly the slot this acquire reserves (spec G2D2/H1
+        # correction pass, section 8).
+        reservation_id = state["run_id"]
+        limit_decision = await live_research.account_rate_limiter.try_acquire(
+            account_id=account_id, reservation_id=reservation_id
+        )
+        if not limit_decision.allowed:
+            # Section 18: no job, no ResearchRequest, no internal counter
+            # exposed. A rejected request never reserved a slot, so there
+            # is nothing to release here.
+            return {
+                "step_count": step_count,
+                "final_response": _bounded_unavailable_response(LocalizedMessageKey.RESEARCH_UNAVAILABLE, language),
+            }
+
+        question = bounded_text(state["user_input"], max_characters=live_research.max_question_characters)
+        scope = ResearchScope(state.get("research_scope") or ResearchScope.NEWS_SCAN.value)
+
+        raw_parameters: dict[str, Any] = {"original_question": question, "scope": scope.value}
+        if scope != ResearchScope.GENERAL_QUESTION:
+            raw_parameters["subject_raw_text"] = question[:250]
+
+        # Sections 5/10: FINANCIAL_FILING_REVIEW/COMPANY_OVERVIEW require a
+        # `sec_cik` resolved only through the authoritative `CikResolverPort`
+        # - never fabricated, never guessed, and never silently downgraded
+        # to NEWS_SCAN. Live Research being enabled at all does not imply
+        # SEC EDGAR specifically is - `cik_resolver` is `None` whenever
+        # SEC EDGAR is disabled, independent of the Perplexity/NEWS_SCAN path.
+        if scope in (ResearchScope.FINANCIAL_FILING_REVIEW, ResearchScope.COMPANY_OVERVIEW):
+            if live_research.cik_resolver is None:
+                # Job-creation rollback (spec G2D2/H1 correction pass,
+                # section 8): the concurrency slot was already reserved
+                # above, but no job will be created after all - release it.
+                await live_research.account_rate_limiter.release(
+                    account_id=account_id, reservation_id=reservation_id
+                )
+                return {
+                    "step_count": step_count,
+                    "final_response": _bounded_unavailable_response(LocalizedMessageKey.RESEARCH_UNAVAILABLE, language),
+                }
+            candidate_ticker, candidate_company_name = _extract_company_reference(question)
+            if candidate_ticker is None and candidate_company_name is None:
+                await live_research.account_rate_limiter.release(
+                    account_id=account_id, reservation_id=reservation_id
+                )
+                return {
+                    "step_count": step_count,
+                    "final_response": _bounded_unavailable_response(
+                        LocalizedMessageKey.CLARIFICATION_NEEDED_COMPANY, language
+                    ),
+                }
+            resolution = await live_research.cik_resolver.resolve(
+                ticker=candidate_ticker, company_name=candidate_company_name
+            )
+            if resolution.status != CikResolutionStatus.RESOLVED or resolution.cik is None:
+                await live_research.account_rate_limiter.release(
+                    account_id=account_id, reservation_id=reservation_id
+                )
+                return {
+                    "step_count": step_count,
+                    "final_response": _bounded_unavailable_response(
+                        LocalizedMessageKey.CLARIFICATION_NEEDED_COMPANY, language
+                    ),
+                }
+            raw_parameters["sec_cik"] = resolution.cik
+            if scope == ResearchScope.COMPANY_OVERVIEW:
+                raw_parameters["sec_concepts"] = list(_DEFAULT_COMPANY_OVERVIEW_CONCEPTS)
+
+        idempotency_key = f"coach-live-research:{state['run_id']}"
+        try:
+            creation_result = await live_research.background_job_service.create_job(
+                job_type=BackgroundJobType.LIVE_RESEARCH_RUN_EXECUTION, raw_parameters=raw_parameters,
+                idempotency_key=idempotency_key, trigger_source=JobTriggerSource.SYSTEM,
+                requested_by_account_id=account_id,
+            )
+        except Exception:
+            await live_research.account_rate_limiter.release(
+                account_id=account_id, reservation_id=reservation_id
+            )
+            return {
+                "step_count": step_count,
+                "final_response": _bounded_unavailable_response(LocalizedMessageKey.RESEARCH_UNAVAILABLE, language),
+            }
+        if creation_result.job.status not in (
+            BackgroundJobStatus.PENDING, BackgroundJobStatus.QUEUED, BackgroundJobStatus.RETRY_SCHEDULED
+        ):
+            await live_research.account_rate_limiter.release(
+                account_id=account_id, reservation_id=reservation_id
+            )
+            return {
+                "step_count": step_count,
+                "final_response": _bounded_unavailable_response(LocalizedMessageKey.RESEARCH_UNAVAILABLE, language),
+            }
+
+        now = self._deps.clock()
+        deadline_at = now + timedelta(seconds=live_research.research_deadline_seconds)
+        async with self._deps.unit_of_work_factory() as uow:
+            await uow.learning_orchestrator_runs.mark_waiting_for_research(
+                UUID(state["run_id"]), waiting_at=now, research_job_id=creation_result.job.job_id,
+                research_deadline_at=deadline_at,
+            )
+            await uow.commit()
+        await self._append_event(
+            state, event_type=LearningOrchestratorEventType.RESEARCH_REQUESTED,
+            message="Requested live research.", metadata={"scope": scope.value},
+        )
+
+        return {
+            "step_count": step_count, "research_job_id": str(creation_result.job.job_id),
+            "research_deadline_at": deadline_at.isoformat(),
+        }
+
+    async def await_research_result(self, state: LearningCoachGraphState) -> dict[str, Any]:
+        """Pauses the run until `COACH_RESEARCH_RESUME` resumes it with
+        bounded outcome metadata (spec section 16) - never raw evidence.
+        The only other `interrupt()` call site in this graph is
+        `approval_interrupt`; this one is driven by the system
+        (`COACH_RESEARCH_RESUME`), never directly by a learner action."""
+        step_count = self._next_step(state)
+        payload = {
+            "research_job_id": state.get("research_job_id"), "scope": state.get("research_scope"),
+            "deadline_at": state.get("research_deadline_at"),
+        }
+        resume_value = interrupt(payload)
+        return {"step_count": step_count, "research_outcome": resume_value}
+
+    async def synthesize_research_response(self, state: LearningCoachGraphState) -> dict[str, Any]:
+        """Spec G2D2/H1 correction pass, section 6: builds a bounded,
+        never-fabricated answer from verified `EvidenceItem` rows
+        reloaded from PostgreSQL, routed through the grounded synthesis
+        order (verified evidence -> `ResearchModelRouter` (Ollama/OpenAI)
+        -> `ResearchEvidenceCitationVerifier` -> `SharedTextSafetyValidator`
+        -> final output bounding) - the resume payload's outcome metadata
+        decides which branch runs, but evidence content itself is never
+        trusted from the resume payload, only from a fresh repository
+        read."""
+        step_count = self._next_step(state)
+        language = self._language_from_state(state)
+        outcome = state.get("research_outcome") or {}
+        outcome_type = outcome.get("outcome")
+
+        if outcome_type == "EVIDENCE_FOUND":
+            research_run_id = outcome.get("research_run_id")
+            evidence_items = []
+            if research_run_id:
+                async with self._deps.unit_of_work_factory() as uow:
+                    evidence_items = await uow.evidence_items.list_for_run(UUID(research_run_id))
+            if evidence_items:
+                await self._append_event(
+                    state, event_type=LearningOrchestratorEventType.RESEARCH_RESOLVED,
+                    message="Live research resolved with evidence.",
+                )
+                return {
+                    "step_count": step_count,
+                    "final_response": await _grounded_synthesis_response(
+                        evidence_items, max_items=self._deps.max_state_list_items,
+                        research_run_id=UUID(research_run_id), user_question=state["user_input"],
+                        scope_value=state.get("research_scope"), language=language,
+                        research_model_router=self._deps.research_model_router,
+                        citation_verifier=_RESEARCH_CITATION_VERIFIER, text_safety_validator=_TEXT_SAFETY_VALIDATOR,
+                    ),
+                }
+            # EVIDENCE_FOUND outcome metadata but nothing loads from
+            # PostgreSQL is an inconsistent state - fail closed to the
+            # no-evidence message rather than fabricate an answer.
+            outcome_type = "NO_EVIDENCE_FOUND"
+
+        await self._append_event(
+            state, event_type=LearningOrchestratorEventType.RESEARCH_RESOLVED,
+            message=f"Live research resolved: {outcome_type or 'UNKNOWN'}.",
+        )
+        message_key = {
+            "NO_EVIDENCE_FOUND": LocalizedMessageKey.RESEARCH_NO_EVIDENCE,
+            "CANCELLED": LocalizedMessageKey.RESEARCH_UNAVAILABLE,
+        }.get(outcome_type, LocalizedMessageKey.PROVIDER_FAILURE)
+        return {"step_count": step_count, "final_response": _bounded_unavailable_response(message_key, language)}
 
     # -- action proposal / approval / execution -----------------------------------------------
 
@@ -582,8 +976,18 @@ class GraphNodes:
         return {"step_count": step_count, "final_response": final_response}
 
     async def persist_final_result(self, state: LearningCoachGraphState) -> dict[str, Any]:
+        """G2D2/H1 correction pass, section 3: the `RUN_COMPLETED` event's
+        `metadata` carries the same bounded `final_response` dict
+        (`answer_markdown`/`citations`/`grounding_status`/
+        `navigation_target`) the SSE `response_completed`/`research_
+        completed`/`research_unavailable` events already expose - this is
+        what lets a frontend that reconnected via polling (after the
+        original SSE connection closed on a research interrupt) fetch the
+        resumed answer through the existing, ownership-checked `GET
+        /runs/{run_id}/events` endpoint, with no new backend surface."""
         step_count = self._next_step(state)
         await self._append_event(
             state, event_type=LearningOrchestratorEventType.RUN_COMPLETED, message="Run completed.",
+            metadata=state.get("final_response") or {},
         )
         return {"step_count": step_count}

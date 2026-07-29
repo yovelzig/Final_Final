@@ -37,7 +37,26 @@ LOCALIZED_STRINGS: dict[LocalizedMessageKey, dict[DetectedLanguage, str]] = {
         DetectedLanguage.EN: EXACT_SCENARIO_FUTURE_INFORMATION_REFUSAL,
         DetectedLanguage.HE: EXACT_SCENARIO_FUTURE_INFORMATION_REFUSAL_HE,
     },
-}
+    LocalizedMessageKey.RESEARCH_UNAVAILABLE: {
+        DetectedLanguage.EN: "Current research is temporarily unavailable. Please try again shortly.",
+        DetectedLanguage.HE: "×ž×—×§×¨ ×¢×“×›× ×™ ××™× ×• ×–×ž×™×Ÿ ×›×¨×’×¢. × ×¡×” ×©×•×‘ ×‘×¢×•×“ ×–×ž×Ÿ ×§×¦×¨.",
+    },
+    LocalizedMessageKey.RESEARCH_WAITING: {
+        DetectedLanguage.EN: "I'm gathering current information to answer that - this may take a moment.",
+        DetectedLanguage.HE: "×× ×™ ××•×¡×£ ×ž×™×“×¢ ×¢×“×›× ×™ ×›×“×™ ×œ×¢× ×•×ª ×¢×œ ×›×š - ×–×” ×¢×©×•×™ ×œ×§×—×ª ×¨×’×¢.",
+    },
+    LocalizedMessageKey.RESEARCH_NO_EVIDENCE: {
+        DetectedLanguage.EN: "I looked for current, approved information on that but couldn't find enough to answer reliably.",
+        DetectedLanguage.HE: "×—×™×¤×©×ª×™ ×ž×™×“×¢ ×¢×“×›× ×™ ×•×ž××•×©×¨ ×‘× ×•×©× ×–×” ××š ×œ× ×ž×¦××ª×™ ×ž×¡×¤×™×§ ×›×“×™ ×œ×¢× ×•×ª ×‘×‘×™×˜×—×•×Ÿ.",
+    },
+    LocalizedMessageKey.PROVIDER_FAILURE: {
+        DetectedLanguage.EN: "I couldn't complete that research request right now. Please try again shortly.",
+        DetectedLanguage.HE: "×œ× ×”×¦×œ×—×ª×™ ×œ×”×©×œ×™× ××ª ×‘×§×©×ª ×”×ž×—×§×¨ ×›×¢×ª. × ×¡×” ×©×•×‘ ×‘×¢×•×“ ×–×ž×Ÿ ×§×¦×¨.",
+    },
+    LocalizedMessageKey.CLARIFICATION_NEEDED_COMPANY: {
+        DetectedLanguage.EN: "Please specify the company name or ticker symbol you want me to research.",
+        DetectedLanguage.HE: "× × ×œ×¦×™×™×Ÿ ××ª ×©× ×”×—×‘×¨×” ××• ×¡×™×ž×•×œ ×”×ž× ×™×” ×©×‘×¨×¦×•× ×š ×œ×—×§×•×¨.",
+    },}
 
 
 def localize(key: LocalizedMessageKey, *, language: DetectedLanguage) -> str:

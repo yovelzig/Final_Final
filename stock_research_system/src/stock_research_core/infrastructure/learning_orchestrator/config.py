@@ -18,6 +18,20 @@ class LangGraphSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     langgraph_enabled: bool = False
+    #: Spec G2D2 section 14: only `finquest-worker-coach` sets this
+    #: true - every other worker process (market/portfolio/knowledge/
+    #: default/research) shares the same `celery_tasks.py` composition
+    #: root but must never itself open a checkpointer pool or compile
+    #: the Coach graph, since only the coach worker's queue
+    #: (`finquest.coach`) ever receives `COACH_RESEARCH_RESUME` tasks.
+    langgraph_coach_worker_enabled: bool = False
+    #: Spec G2D2 section 5/11: gates the automatic Live Research trigger
+    #: branch (`request_live_research`/`await_research_result` nodes).
+    #: `False` (the default) means `NodeDependencies.live_research` is
+    #: never constructed with `enabled=True` by any composition root, so
+    #: every current-information question falls through to the existing
+    #: static-Tutor-RAG/bounded-unavailable-response behavior, unchanged.
+    langgraph_live_research_route_enabled: bool = False
     langgraph_graph_version: str = "learning-coach-graph-v1"
 
     langgraph_max_steps: int = 30

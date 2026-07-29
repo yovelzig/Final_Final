@@ -66,3 +66,7 @@ def detect_language(text: str) -> DetectedLanguage:
     if alphabetic_count == 0:
         return DetectedLanguage.EN
     return DetectedLanguage.HE if (hebrew_count / alphabetic_count) >= _MINIMUM_HEBREW_RATIO else DetectedLanguage.EN
+
+
+# Compatibility name bound to the canonical enum class; not a second enum.
+Language = DetectedLanguage

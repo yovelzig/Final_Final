@@ -206,3 +206,67 @@ class SecEdgarSettings(BaseSettings):
                 f"live_research_sec_requests_per_second must not exceed {_MAX_SEC_REQUESTS_PER_SECOND}"
             )
         return self
+
+
+class LiveResearchAccountLimitSettings(BaseSettings):
+    """Spec G2D2 section 5/18: per-account abuse limits enforced by
+    `RedisAccountResearchLimiter` before any `LIVE_RESEARCH_RUN_EXECUTION`
+    job is created on a learner's behalf, and the bounded input-length
+    check `request_live_research` applies before building the job's
+    `raw_parameters`. Independent of whether either provider adapter is
+    enabled - these are abuse limits on the *trigger path*, not provider
+    configuration."""
+
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    live_research_per_account_concurrent_limit: int = 1
+    live_research_per_account_hourly_limit: int = 10
+    live_research_max_question_characters: int = 5000
+
+    @model_validator(mode="after")
+    def _validate_bounds(self) -> "LiveResearchAccountLimitSettings":
+        if self.live_research_per_account_concurrent_limit < 1:
+            raise ValueError("live_research_per_account_concurrent_limit must be at least 1")
+        if self.live_research_per_account_hourly_limit < 1:
+            raise ValueError("live_research_per_account_hourly_limit must be at least 1")
+        if self.live_research_max_question_characters < 1:
+            raise ValueError("live_research_max_question_characters must be at least 1")
+        return self
+
+
+class ResearchModelSettings(BaseSettings):
+    """Spec G2D2/H1 correction pass, section 6: Ollama-primary
+    configuration for Live Research grounded synthesis
+    (`synthesize_research_response`) - independent of `ai_tutor.config.
+    TutorModelSettings`/`OpenAIReasoningSettings`, even though both may
+    point at the same Ollama Cloud/OpenAI accounts. Constructing this
+    (even with empty Ollama credentials) never raises and never makes a
+    network call - `research_model_factory.build_research_model` returns
+    `None` when unconfigured, gated at composition exactly like
+    `cik_resolver`, so `synthesize_research_response` takes the bounded
+    provider-unavailable path rather than failing to start."""
+
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    research_model_ollama_base_url: str = "https://ollama.com/api"
+    research_model_ollama_api_key: str = ""
+    research_model_ollama_model: str = ""
+    research_model_ollama_timeout_seconds: float = 60.0
+    research_model_ollama_thinking_level: str = "low"
+
+    #: Optional secondary provider through `ResearchModelRouter` - a
+    #: distinct flag from Tutor's `OPENAI_REASONING_ENABLED`, defaults
+    #: false (the safe, rollback-neutral setting).
+    research_model_openai_enabled: bool = False
+    research_model_openai_api_key: str = ""
+    research_model_openai_model: str = ""
+    research_model_openai_timeout_seconds: float = 45.0
+
+    @model_validator(mode="after")
+    def _validate_when_openai_enabled(self) -> "ResearchModelSettings":
+        if self.research_model_openai_enabled:
+            if not self.research_model_openai_api_key:
+                raise ValueError("research_model_openai_api_key is required when research_model_openai_enabled=true")
+            if not self.research_model_openai_model:
+                raise ValueError("research_model_openai_model is required when research_model_openai_enabled=true")
+        return self

@@ -6,11 +6,12 @@ against the real PostgreSQL test database: `LearningOrchestratorThread`/
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
 from stock_research_core.domain.ai_tutor.enums import TutorContextType
+from stock_research_core.domain.identity.models import UserAccount
 from stock_research_core.domain.learning.models import LearnerProfile
 from stock_research_core.domain.learning_orchestrator.enums import (
     LearnerApprovalDecision,
@@ -40,6 +41,20 @@ async def _seed_learner(uow_factory) -> LearnerProfile:
     return stored
 
 
+async def _seed_account(uow_factory) -> UUID:
+    """`learning_orchestrator_runs.trusted_account_id` carries a real
+    foreign key to `user_accounts` (spec G2D2 section 9), so a run needs
+    a genuine account row, not a bare `uuid4()`."""
+    async with uow_factory() as uow:
+        email = f"coach-run-account-{uuid4().hex[:10]}@example.com"
+        account = await uow.user_accounts.create_account(
+            account=UserAccount(email=email, normalized_email=email, display_name="Coach Run Test Account"),
+            password_hash="not-a-real-hash",
+        )
+        await uow.commit()
+    return account.account_id
+
+
 def _thread(learner_id, **overrides) -> LearningOrchestratorThread:
     fields = dict(
         learner_id=learner_id, title="My coach thread", graph_name="finquest-learning-coach",
@@ -49,10 +64,10 @@ def _thread(learner_id, **overrides) -> LearningOrchestratorThread:
     return LearningOrchestratorThread(**fields)
 
 
-def _run(thread_id, learner_id, **overrides) -> LearningOrchestratorRun:
+def _run(thread_id, learner_id, trusted_account_id, **overrides) -> LearningOrchestratorRun:
     fields = dict(
-        thread_id=thread_id, learner_id=learner_id, idempotency_key=f"key-{uuid4()}", correlation_id=str(uuid4()),
-        graph_version="learning-coach-graph-v1",
+        thread_id=thread_id, learner_id=learner_id, trusted_account_id=trusted_account_id,
+        idempotency_key=f"key-{uuid4()}", correlation_id=str(uuid4()), graph_version="learning-coach-graph-v1",
     )
     fields.update(overrides)
     return LearningOrchestratorRun(**fields)
@@ -61,6 +76,7 @@ def _run(thread_id, learner_id, **overrides) -> LearningOrchestratorRun:
 class TestLearningOrchestratorThreadRepository:
     async def test_create_and_get_by_id(self, uow_factory) -> None:
         learner = await _seed_learner(uow_factory)
+        account_id = await _seed_account(uow_factory)
         thread = _thread(learner.learner_id)
         async with uow_factory() as uow:
             created = await uow.learning_orchestrator_threads.create(thread)
@@ -73,6 +89,7 @@ class TestLearningOrchestratorThreadRepository:
 
     async def test_list_for_learner_filters_by_status(self, uow_factory) -> None:
         learner = await _seed_learner(uow_factory)
+        account_id = await _seed_account(uow_factory)
         async with uow_factory() as uow:
             active = await uow.learning_orchestrator_threads.create(_thread(learner.learner_id, title="Active"))
             await uow.commit()
@@ -92,6 +109,7 @@ class TestLearningOrchestratorThreadRepository:
 
     async def test_count_for_learner(self, uow_factory) -> None:
         learner = await _seed_learner(uow_factory)
+        account_id = await _seed_account(uow_factory)
         async with uow_factory() as uow:
             await uow.learning_orchestrator_threads.create(_thread(learner.learner_id, title="One"))
             await uow.learning_orchestrator_threads.create(_thread(learner.learner_id, title="Two"))
@@ -102,6 +120,7 @@ class TestLearningOrchestratorThreadRepository:
 
     async def test_close_sets_closed_at_and_status(self, uow_factory) -> None:
         learner = await _seed_learner(uow_factory)
+        account_id = await _seed_account(uow_factory)
         async with uow_factory() as uow:
             created = await uow.learning_orchestrator_threads.create(_thread(learner.learner_id))
             await uow.commit()
@@ -115,10 +134,11 @@ class TestLearningOrchestratorThreadRepository:
 class TestLearningOrchestratorRunRepository:
     async def test_create_and_get_by_idempotency_key(self, uow_factory) -> None:
         learner = await _seed_learner(uow_factory)
+        account_id = await _seed_account(uow_factory)
         async with uow_factory() as uow:
             thread = await uow.learning_orchestrator_threads.create(_thread(learner.learner_id))
             await uow.commit()
-        run = _run(thread.thread_id, learner.learner_id, idempotency_key="stable-key")
+        run = _run(thread.thread_id, learner.learner_id, account_id, idempotency_key="stable-key")
         async with uow_factory() as uow:
             created = await uow.learning_orchestrator_runs.create(run)
             await uow.commit()
@@ -131,9 +151,10 @@ class TestLearningOrchestratorRunRepository:
 
     async def test_lifecycle_transitions_round_trip(self, uow_factory) -> None:
         learner = await _seed_learner(uow_factory)
+        account_id = await _seed_account(uow_factory)
         async with uow_factory() as uow:
             thread = await uow.learning_orchestrator_threads.create(_thread(learner.learner_id))
-            created = await uow.learning_orchestrator_runs.create(_run(thread.thread_id, learner.learner_id))
+            created = await uow.learning_orchestrator_runs.create(_run(thread.thread_id, learner.learner_id, account_id))
             await uow.commit()
 
         async with uow_factory() as uow:
@@ -162,9 +183,10 @@ class TestLearningOrchestratorRunRepository:
 
     async def test_mark_waiting_for_learner(self, uow_factory) -> None:
         learner = await _seed_learner(uow_factory)
+        account_id = await _seed_account(uow_factory)
         async with uow_factory() as uow:
             thread = await uow.learning_orchestrator_threads.create(_thread(learner.learner_id))
-            created = await uow.learning_orchestrator_runs.create(_run(thread.thread_id, learner.learner_id))
+            created = await uow.learning_orchestrator_runs.create(_run(thread.thread_id, learner.learner_id, account_id))
             await uow.learning_orchestrator_runs.mark_running(created.run_id, started_at=NOW)
             await uow.commit()
         async with uow_factory() as uow:
@@ -173,11 +195,56 @@ class TestLearningOrchestratorRunRepository:
         assert waiting.status == LearningOrchestratorRunStatus.WAITING_FOR_LEARNER
         assert waiting.waiting_at == NOW
 
-    async def test_mark_failed_requires_sanitized_failure_fields(self, uow_factory) -> None:
+    async def test_mark_waiting_for_research_and_set_research_outcome_round_trip(self, uow_factory) -> None:
         learner = await _seed_learner(uow_factory)
+        account_id = await _seed_account(uow_factory)
+        research_job_id = uuid4()
         async with uow_factory() as uow:
             thread = await uow.learning_orchestrator_threads.create(_thread(learner.learner_id))
-            created = await uow.learning_orchestrator_runs.create(_run(thread.thread_id, learner.learner_id))
+            created = await uow.learning_orchestrator_runs.create(_run(thread.thread_id, learner.learner_id, account_id))
+            await uow.learning_orchestrator_runs.mark_running(created.run_id, started_at=NOW)
+            await uow.commit()
+
+        async with uow_factory() as uow:
+            waiting = await uow.learning_orchestrator_runs.mark_waiting_for_research(
+                created.run_id, waiting_at=NOW, research_job_id=research_job_id, research_deadline_at=NOW,
+            )
+            await uow.commit()
+        assert waiting.status == LearningOrchestratorRunStatus.WAITING_FOR_RESEARCH
+        assert waiting.research_job_id == research_job_id
+        assert waiting.research_request_id is None
+
+        async with uow_factory() as uow:
+            found = await uow.learning_orchestrator_runs.get_by_research_job_id(research_job_id)
+        assert found is not None
+        assert found.run_id == created.run_id
+
+        async with uow_factory() as uow:
+            still_waiting = await uow.learning_orchestrator_runs.list_waiting_for_research()
+        assert created.run_id in {run.run_id for run in still_waiting}
+
+        research_request_id = uuid4()
+        research_run_id = uuid4()
+        async with uow_factory() as uow:
+            resolved = await uow.learning_orchestrator_runs.set_research_outcome(
+                created.run_id, research_request_id=research_request_id, research_run_id=research_run_id,
+                research_failure_category=None, evidence_count=3,
+            )
+            await uow.commit()
+        assert resolved.research_request_id == research_request_id
+        assert resolved.research_run_id == research_run_id
+        assert resolved.evidence_count == 3
+        # `set_research_outcome` alone never changes `status` - a separate
+        # `mark_succeeded`/`mark_failed` call (driven by `COACH_RESEARCH_RESUME`)
+        # owns that transition once the resumed graph run finishes.
+        assert resolved.status == LearningOrchestratorRunStatus.WAITING_FOR_RESEARCH
+
+    async def test_mark_failed_requires_sanitized_failure_fields(self, uow_factory) -> None:
+        learner = await _seed_learner(uow_factory)
+        account_id = await _seed_account(uow_factory)
+        async with uow_factory() as uow:
+            thread = await uow.learning_orchestrator_threads.create(_thread(learner.learner_id))
+            created = await uow.learning_orchestrator_runs.create(_run(thread.thread_id, learner.learner_id, account_id))
             await uow.commit()
         async with uow_factory() as uow:
             failed = await uow.learning_orchestrator_runs.mark_failed(
@@ -190,10 +257,11 @@ class TestLearningOrchestratorRunRepository:
 
     async def test_list_for_thread(self, uow_factory) -> None:
         learner = await _seed_learner(uow_factory)
+        account_id = await _seed_account(uow_factory)
         async with uow_factory() as uow:
             thread = await uow.learning_orchestrator_threads.create(_thread(learner.learner_id))
-            await uow.learning_orchestrator_runs.create(_run(thread.thread_id, learner.learner_id))
-            await uow.learning_orchestrator_runs.create(_run(thread.thread_id, learner.learner_id))
+            await uow.learning_orchestrator_runs.create(_run(thread.thread_id, learner.learner_id, account_id))
+            await uow.learning_orchestrator_runs.create(_run(thread.thread_id, learner.learner_id, account_id))
             await uow.commit()
         async with uow_factory() as uow:
             runs = await uow.learning_orchestrator_runs.list_for_thread(thread.thread_id)
@@ -203,9 +271,10 @@ class TestLearningOrchestratorRunRepository:
 class TestLearningOrchestratorEventRepository:
     async def test_append_and_list_for_run_preserves_sequence_order(self, uow_factory) -> None:
         learner = await _seed_learner(uow_factory)
+        account_id = await _seed_account(uow_factory)
         async with uow_factory() as uow:
             thread = await uow.learning_orchestrator_threads.create(_thread(learner.learner_id))
-            run = await uow.learning_orchestrator_runs.create(_run(thread.thread_id, learner.learner_id))
+            run = await uow.learning_orchestrator_runs.create(_run(thread.thread_id, learner.learner_id, account_id))
             await uow.commit()
 
         async with uow_factory() as uow:
@@ -240,9 +309,10 @@ class TestLearningOrchestratorActionRepository:
 
     async def test_create_and_get_by_idempotency_key(self, uow_factory) -> None:
         learner = await _seed_learner(uow_factory)
+        account_id = await _seed_account(uow_factory)
         async with uow_factory() as uow:
             thread = await uow.learning_orchestrator_threads.create(_thread(learner.learner_id))
-            run = await uow.learning_orchestrator_runs.create(_run(thread.thread_id, learner.learner_id))
+            run = await uow.learning_orchestrator_runs.create(_run(thread.thread_id, learner.learner_id, account_id))
             await uow.commit()
         proposal = self._proposal(run.run_id, thread.thread_id, learner.learner_id, idempotency_key="stable-key")
         async with uow_factory() as uow:
@@ -257,9 +327,10 @@ class TestLearningOrchestratorActionRepository:
 
     async def test_approval_lifecycle_round_trips(self, uow_factory) -> None:
         learner = await _seed_learner(uow_factory)
+        account_id = await _seed_account(uow_factory)
         async with uow_factory() as uow:
             thread = await uow.learning_orchestrator_threads.create(_thread(learner.learner_id))
-            run = await uow.learning_orchestrator_runs.create(_run(thread.thread_id, learner.learner_id))
+            run = await uow.learning_orchestrator_runs.create(_run(thread.thread_id, learner.learner_id, account_id))
             created = await uow.learning_orchestrator_actions.create(
                 self._proposal(run.run_id, thread.thread_id, learner.learner_id)
             )
@@ -293,9 +364,10 @@ class TestLearningOrchestratorActionRepository:
 
     async def test_mark_rejected(self, uow_factory) -> None:
         learner = await _seed_learner(uow_factory)
+        account_id = await _seed_account(uow_factory)
         async with uow_factory() as uow:
             thread = await uow.learning_orchestrator_threads.create(_thread(learner.learner_id))
-            run = await uow.learning_orchestrator_runs.create(_run(thread.thread_id, learner.learner_id))
+            run = await uow.learning_orchestrator_runs.create(_run(thread.thread_id, learner.learner_id, account_id))
             created = await uow.learning_orchestrator_actions.create(
                 self._proposal(run.run_id, thread.thread_id, learner.learner_id)
             )
@@ -307,9 +379,10 @@ class TestLearningOrchestratorActionRepository:
 
     async def test_list_for_run(self, uow_factory) -> None:
         learner = await _seed_learner(uow_factory)
+        account_id = await _seed_account(uow_factory)
         async with uow_factory() as uow:
             thread = await uow.learning_orchestrator_threads.create(_thread(learner.learner_id))
-            run = await uow.learning_orchestrator_runs.create(_run(thread.thread_id, learner.learner_id))
+            run = await uow.learning_orchestrator_runs.create(_run(thread.thread_id, learner.learner_id, account_id))
             await uow.learning_orchestrator_actions.create(
                 self._proposal(run.run_id, thread.thread_id, learner.learner_id)
             )

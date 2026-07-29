@@ -320,7 +320,10 @@ class SpyPromptBuilder:
         return self._real.build(**kwargs)
 
 
-def _build_service(uow_factory, *, candidates=None, model_result=None, sufficiency_gate=None, prompt_builder=None):
+def _build_service(
+    uow_factory, *, candidates=None, model_result=None, sufficiency_gate=None, prompt_builder=None,
+    language_bridge=None,
+):
     """Test-harness composition root. `GroundedAITutorService.sufficiency_gate`
     is a required keyword with no constructor default - this helper is the
     one place in this file that decides what a test gets when it doesn't
@@ -336,6 +339,7 @@ def _build_service(uow_factory, *, candidates=None, model_result=None, sufficien
     service = GroundedAITutorService(
         unit_of_work_factory=uow_factory, retriever=retriever, tutor_model=tutor_model,
         guardrail=guardrail, prompt_builder=builder, sufficiency_gate=gate, clock=lambda: NOW,
+        language_bridge=language_bridge,
     )
     return service, retriever, tutor_model
 
@@ -396,6 +400,47 @@ class TestAsk:
         assert response.citations[0].source_title == "Approved Source"
         assert retriever.calls == ["What is diversification?"]
         assert tutor_model.calls == 1
+
+    async def test_hebrew_question_is_translated_for_retrieval_only_when_bridge_enabled(self) -> None:
+        from stock_research_core.application.language.service import LanguageBridgeService
+
+        class _FakeTranslator:
+            async def translate_to_english(self, *, text: str) -> str:
+                return "what is diversification?"
+
+        uow_factory, store = _make_uow_factory()
+        learner = _learner()
+        store["learners"][learner.learner_id] = learner
+        candidate = _candidate()
+        bridge = LanguageBridgeService(translator=_FakeTranslator(), enabled=True)
+        service, retriever, _m = _build_service(uow_factory, candidates=[candidate], language_bridge=bridge)
+        conversation = await self._create_conversation(service, learner, store)
+
+        hebrew_question = "מה זה גיוון תיק השקעות?"
+        response = await service.ask(conversation_id=conversation.conversation_id, question=hebrew_question)
+
+        # Retrieval used the translated English query...
+        assert retriever.calls == ["what is diversification?"]
+        # ...but the persisted request message and answer lineage keep
+        # the learner's original Hebrew question, untouched.
+        assert response.answer.status == TutorAnswerStatus.VALIDATED
+        stored_messages = store["messages"][conversation.conversation_id]
+        assert stored_messages[0].content == hebrew_question
+
+    async def test_language_bridge_disabled_by_default_leaves_retrieval_query_unchanged(self) -> None:
+        uow_factory, store = _make_uow_factory()
+        learner = _learner()
+        store["learners"][learner.learner_id] = learner
+        candidate = _candidate()
+        # No `language_bridge` passed - matches every production
+        # composition root today.
+        service, retriever, _m = _build_service(uow_factory, candidates=[candidate])
+        conversation = await self._create_conversation(service, learner, store)
+
+        hebrew_question = "מה זה גיוון תיק השקעות?"
+        await service.ask(conversation_id=conversation.conversation_id, question=hebrew_question)
+
+        assert retriever.calls == [hebrew_question]
 
     async def test_buy_sell_request_refuses_without_retrieval(self) -> None:
         uow_factory, store = _make_uow_factory()
