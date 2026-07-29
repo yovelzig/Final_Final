@@ -199,7 +199,7 @@ def create_app(
             tutor_model_settings, openai_reasoning_settings=openai_reasoning_settings
         )
         app.state.knowledge_sufficiency_settings = knowledge_sufficiency_settings
-        app.state.knowledge_sufficiency_gate = _build_knowledge_sufficiency_gate(knowledge_sufficiency_settings)
+        app.state.knowledge_sufficiency_gate = build_knowledge_sufficiency_gate(knowledge_sufficiency_settings)
         app.state.language_service_settings = language_service_settings
         app.state.language_service = build_language_service(
             language_service_settings, tutor_model_settings=tutor_model_settings
